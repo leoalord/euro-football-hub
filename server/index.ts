@@ -1,7 +1,8 @@
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
+import { registerRoutes, warmCaches } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { startBackgroundRefresh } from "./cache";
 
 const app = express();
 const httpServer = createServer(app);
@@ -98,6 +99,7 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      startBackgroundRefresh(warmCaches);
     },
   );
 })();

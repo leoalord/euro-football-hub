@@ -1,9 +1,15 @@
-import type { Express } from "express";
+import type { Express, Response } from "express";
 import { createServer, type Server } from "http";
 import { LEAGUES, EURO_CUP_CONFIG, leagueSlugs, type LeagueSlug } from "@shared/schema";
 import { fetchAllLeagues, fetchLeagueData, fetchBBCNews } from "./espn";
 import { fetchAllEuropeanCups, fetchEuropeanCupData } from "./european-cups";
 import { fetchAllDomesticCups } from "./domestic-cups";
+import { getCacheTTL } from "./cache";
+
+function setApiCacheHeaders(res: Response) {
+  const ttlSec = Math.max(30, Math.floor(getCacheTTL() / 1000));
+  res.setHeader("Cache-Control", `public, max-age=30, stale-while-revalidate=${ttlSec}`);
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -13,6 +19,7 @@ export async function registerRoutes(
   // Dashboard: all leagues overview
   app.get("/api/dashboard", async (_req, res) => {
     try {
+      setApiCacheHeaders(res);
       const leagues = await fetchAllLeagues();
       res.json({
         leagues,
@@ -33,6 +40,7 @@ export async function registerRoutes(
     }
 
     try {
+      setApiCacheHeaders(res);
       const data = await fetchLeagueData(slug);
       res.json(data);
     } catch (error) {
@@ -44,6 +52,7 @@ export async function registerRoutes(
   // BBC news feed
   app.get("/api/news/bbc", async (_req, res) => {
     try {
+      setApiCacheHeaders(res);
       const articles = await fetchBBCNews();
       res.json(articles);
     } catch (error) {
@@ -54,12 +63,14 @@ export async function registerRoutes(
 
   // League config
   app.get("/api/leagues", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400");
     res.json(LEAGUES);
   });
 
   // European Cups: all competitions
   app.get("/api/european-cups", async (_req, res) => {
     try {
+      setApiCacheHeaders(res);
       const cups = await fetchAllEuropeanCups();
       res.json(cups);
     } catch (error) {
@@ -77,6 +88,7 @@ export async function registerRoutes(
       return;
     }
     try {
+      setApiCacheHeaders(res);
       const data = await fetchEuropeanCupData(fullSlug);
       res.json(data);
     } catch (error) {
@@ -88,6 +100,7 @@ export async function registerRoutes(
   // Domestic Cups: all domestic cup competitions
   app.get("/api/domestic-cups", async (_req, res) => {
     try {
+      setApiCacheHeaders(res);
       const cups = await fetchAllDomesticCups();
       res.json(cups);
     } catch (error) {
@@ -97,4 +110,20 @@ export async function registerRoutes(
   });
 
   return httpServer;
+}
+
+export async function warmCaches(): Promise<void> {
+  const started = Date.now();
+  console.log("[cache] warming...");
+  try {
+    await Promise.all([
+      fetchAllLeagues(),
+      fetchAllEuropeanCups(),
+      fetchBBCNews(),
+    ]);
+    await fetchAllDomesticCups();
+    console.log(`[cache] warm complete in ${Date.now() - started}ms`);
+  } catch (error) {
+    console.error("[cache] warm failed:", error);
+  }
 }
