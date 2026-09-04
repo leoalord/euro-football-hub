@@ -42,10 +42,22 @@ Builds the React frontend and bundles the Express server into `dist/index.cjs`.
 
 ### Railway (Recommended — simplest)
 
-1. Connect this repo to [Railway](https://railway.app)
-2. Set start command: `npm start`
-3. Set build command: `npm run build`
-4. Deploy — that's it. Railway runs the full Node server.
+Production: [euro-football-hub-production.up.railway.app](https://euro-football-hub-production.up.railway.app)
+
+The Express server already reads `PORT` and binds `0.0.0.0`. Railway should build with `npm run build` and start with `npm start`. Optional: `UMAMI_URL` and `UMAMI_WEBSITE_ID` for analytics.
+
+**Ship the current `main` from the dashboard**
+
+1. Open the [Railway project](https://railway.com/project/1663f77e-efa1-4ddd-b892-e6f1746e5e1b?environmentId=6d54bd33-61a0-4eaf-8d94-e16dbb636bae)
+2. Command Palette (`⌘K` / `Ctrl+K`) → **Deploy Latest Commit**
+3. To restore push-to-`main` autodeploys: service **Settings → Source** → disconnect GitHub, reconnect `leoalord/euro-football-hub` on `main`, and enable Auto Deploy
+
+**Or deploy from GitHub Actions**
+
+1. In Railway: Project Settings → Tokens → create a **project token**
+2. In GitHub: repo **Settings → Secrets and variables → Actions** → add `RAILWAY_TOKEN`
+3. If the service is not named `euro-football-hub`, add a repo Actions variable `RAILWAY_SERVICE` with the real name
+4. Push to `main` or run **Deploy to Railway** from the Actions tab
 
 ### Render
 

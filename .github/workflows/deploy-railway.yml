@@ -1,0 +1,50 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: railway-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ secrets.RAILWAY_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy current commit
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          SERVICE="${RAILWAY_SERVICE:-euro-football-hub}"
+          railway up --ci --yes \
+            --project 1663f77e-efa1-4ddd-b892-e6f1746e5e1b \
+            --environment production \
+            --service "$SERVICE" \
+            --message "GitHub ${GITHUB_SHA:0:7}"
+
+      - name: Reconnect GitHub autodeploys
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          SERVICE="${RAILWAY_SERVICE:-euro-football-hub}"
+          railway service source connect \
+            --repo leoalord/euro-football-hub \
+            --branch main \
+            --project 1663f77e-efa1-4ddd-b892-e6f1746e5e1b \
+            --environment production \
+            --service "$SERVICE"
+        continue-on-error: true
