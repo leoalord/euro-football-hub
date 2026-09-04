@@ -10,7 +10,7 @@ A real-time dashboard tracking the top 5 European football leagues — Premier L
 - **Competition Badges** — shows which teams are still in UCL, UEL, UECL, and domestic cups (FA Cup, DFB-Pokal, Coppa Italia, Copa del Rey, Coupe de France)
 - **Betting Odds** — DraftKings moneylines on upcoming matches
 - **Upset Detection** — flags results that went against the pre-match favorite
-- **Auto-refresh** — 5-minute cache during match hours, 30-minute off-peak
+- **Auto-refresh** — 5-minute cache during match hours, 30-minute off-peak; stale data is served instantly while a background refresh runs
 - **League Detail Pages** — full standings table, upcoming fixtures, recent results, news
 
 ## Tech Stack
@@ -74,6 +74,20 @@ A `vercel.json` is included. Note that Vercel uses serverless functions, so the 
 - **Competition tracking:** ESPN scoreboard API scanned daily across domestic cups and European tournaments
 
 No API keys required. All data sources are public.
+
+## Caching
+
+The slow path used to be a cache miss on `/api/dashboard`: each visit could wait on hundreds of independent ESPN scoreboard calls (per-day, per-league, and the same European competitions scanned five times).
+
+The server now:
+
+1. **Serves stale data immediately** when the TTL expires, and refreshes ESPN/Kalshi in the background (stale-while-revalidate). Concurrent visitors share one in-flight fetch.
+2. **Warms the cache on boot** and keeps it warm on a timer just under the current TTL, so the first visitor after a deploy rarely waits.
+3. **Collapses ESPN fan-out** — match history is fetched in two-week ranges instead of one request per day, and cup/European remaining-team scans run once globally instead of once per league.
+4. **Sends `Cache-Control: private, no-cache`** on API responses so browsers revalidate against the (now fast) server cache rather than keeping a long stale copy.
+5. **Persists the last dashboard/league/cups payload in `localStorage`** so a revisit paints immediately while a background refetch runs.
+
+TTL is still 5 minutes during typical European match hours (10:00–23:00 UTC) and 30 minutes off-peak. Prediction-market (Kalshi) payloads stay at 15–30 minutes and are not stored when a fetch returns empty, so a failed odds call can retry.
 
 ## Project Structure
 

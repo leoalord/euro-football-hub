@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useCachedQuery } from "@/hooks/use-cached-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { DashboardData, LeagueData, BattleGroup, Match, StandingEntry } from "@shared/schema";
 import { Link } from "wouter";
@@ -369,7 +369,7 @@ function LeagueCardSkeleton() {
 export default function Dashboard() {
   const { refetchInterval } = useAutoRefresh();
 
-  const { data, isLoading, error, dataUpdatedAt } = useQuery<DashboardData>({
+  const { data, error, dataUpdatedAt, isFetching } = useCachedQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
     refetchInterval,
     staleTime: 60_000,
@@ -407,7 +407,7 @@ export default function Dashboard() {
           <div className="flex items-center gap-3">
             {dataUpdatedAt > 0 && (
               <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                <RefreshCw className="w-3 h-3" />
+                <RefreshCw className={`w-3 h-3 ${isFetching ? "animate-spin" : ""}`} />
                 <span>Updated {formatDistanceToNow(dataUpdatedAt, { addSuffix: true })}</span>
               </div>
             )}
@@ -417,16 +417,16 @@ export default function Dashboard() {
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {error && (
+        {error && !data && (
           <div className="text-center py-12">
             <p className="text-destructive text-sm">Failed to load data. Retrying...</p>
           </div>
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {isLoading
+          {!data
             ? [...Array(5)].map((_, i) => <LeagueCardSkeleton key={i} />)
-            : data?.leagues.map((league) => (
+            : data.leagues.map((league) => (
                 <LeagueCard key={league.slug} league={league} />
               ))}
         </div>

@@ -1,37 +1,17 @@
 import { LEAGUES, COMPETITIONS, LEAGUE_CUPS, EURO_COMPS, type LeagueSlug, type StandingEntry, type Match, type Article, type LeagueData, type BattleGroup, type MatchOdds } from "@shared/schema";
 import { fetchLeagueOdds, getTitleOddsForTeam, getRelegationOddsForTeam, type LeagueOdds } from "./kalshi";
+import { cached, getCacheTTL } from "./cache";
 
 const ESPN_BASE = "https://site.api.espn.com/apis";
 
-// In-memory cache
-interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
+function addDays(base: Date, days: number): Date {
+  const d = new Date(base.getTime());
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
 }
 
-const cache = new Map<string, CacheEntry<any>>();
-
-function getCached<T>(key: string, maxAgeMs: number): T | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > maxAgeMs) {
-    cache.delete(key);
-    return null;
-  }
-  return entry.data as T;
-}
-
-function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, timestamp: Date.now() });
-}
-
-function getCacheTTL(): number {
-  const now = new Date();
-  const hour = now.getUTCHours();
-  if (hour >= 10 && hour <= 23) {
-    return 5 * 60 * 1000; // 5 minutes during match hours
-  }
-  return 30 * 60 * 1000; // 30 minutes off-peak
+function yyyymmdd(d: Date): string {
+  return d.toISOString().slice(0, 10).replace(/-/g, "");
 }
 
 async function fetchJSON(url: string): Promise<any> {
@@ -40,6 +20,7 @@ async function fetchJSON(url: string): Promise<any> {
       "User-Agent": "EuroFootballHub/2.0",
       "Accept": "application/json",
     },
+    signal: AbortSignal.timeout(12_000),
   });
   if (!res.ok) {
     throw new Error(`ESPN API error: ${res.status} ${res.statusText} for ${url}`);
@@ -129,225 +110,184 @@ function detectUpset(match: Match): { isUpset: boolean; upsetDetails?: string } 
   return { isUpset: false };
 }
 
-// Fetch team form data (WDLWW) from recent scoreboard dates
-async function fetchTeamForms(slug: LeagueSlug): Promise<Map<string, string>> {
-  const cacheKey = `forms:${slug}`;
-  const cached = getCached<Map<string, string>>(cacheKey, getCacheTTL());
-  if (cached) return cached;
-
-  const formMap = new Map<string, string>();
-  // Check today + past few days to find form for as many teams as possible
-  const now = new Date();
-  const dates: string[] = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    dates.push(d.toISOString().slice(0, 10).replace(/-/g, ""));
-  }
-  // Also check upcoming
-  for (let i = 1; i <= 7; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + i);
-    dates.push(d.toISOString().slice(0, 10).replace(/-/g, ""));
-  }
-
-  try {
-    // Fetch a few dates in parallel to get more team forms
-    const results = await Promise.allSettled(
-      dates.map(date => fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${slug}/scoreboard?dates=${date}`))
-    );
-    for (const result of results) {
-      if (result.status === "fulfilled") {
-        const events = result.value?.events || [];
-        for (const event of events) {
-          const comps = event.competitions?.[0]?.competitors || [];
-          for (const c of comps) {
-            if (c.form && c.team?.id && !formMap.has(c.team.id)) {
-              formMap.set(c.team.id, c.form);
-            }
-          }
-        }
-      }
-    }
-  } catch {
-    // Form data is supplementary, don't fail if unavailable
-  }
-  setCache(cacheKey, formMap);
-  return formMap;
-}
-
 export async function fetchStandings(slug: LeagueSlug): Promise<StandingEntry[]> {
-  const cacheKey = `standings:${slug}`;
-  const cached = getCached<StandingEntry[]>(cacheKey, getCacheTTL());
-  if (cached) return cached;
+  return cached(`standings:${slug}`, getCacheTTL(), async () => {
+    try {
+      const data = await fetchJSON(`${ESPN_BASE}/v2/sports/soccer/${slug}/standings`);
+      const entries = data?.children?.[0]?.standings?.entries || [];
+      const totalGames = LEAGUES[slug].totalGames;
 
-  try {
-    const [data, formMap] = await Promise.all([
-      fetchJSON(`${ESPN_BASE}/v2/sports/soccer/${slug}/standings`),
-      fetchTeamForms(slug),
-    ]);
-    const entries = data?.children?.[0]?.standings?.entries || [];
-    const totalGames = LEAGUES[slug].totalGames;
+      const standings: StandingEntry[] = entries.map((entry: any) => {
+        const stats = entry.stats || [];
+        const getStat = (name: string): number => {
+          const stat = stats.find((s: any) => s.name === name);
+          return stat ? Number(stat.value) || 0 : 0;
+        };
 
-    const standings: StandingEntry[] = entries.map((entry: any) => {
-      const stats = entry.stats || [];
-      const getStat = (name: string): number => {
-        const stat = stats.find((s: any) => s.name === name);
-        return stat ? Number(stat.value) || 0 : 0;
-      };
+        const gp = getStat("gamesPlayed");
+        const pts = getStat("points");
+        const remaining = totalGames - gp;
 
-      const gp = getStat("gamesPlayed");
-      const pts = getStat("points");
-      const remaining = totalGames - gp;
-      const teamId = entry.team?.id || "";
+        return {
+          rank: getStat("rank"),
+          teamId: entry.team?.id || "",
+          teamName: entry.team?.displayName || entry.team?.name || "",
+          teamAbbreviation: entry.team?.abbreviation || "",
+          teamLogo: entry.team?.logos?.[0]?.href || "",
+          gamesPlayed: gp,
+          wins: getStat("wins"),
+          draws: getStat("ties"),
+          losses: getStat("losses"),
+          goalsFor: getStat("pointsFor"),
+          goalsAgainst: getStat("pointsAgainst"),
+          goalDifference: getStat("pointDifferential"),
+          points: pts,
+          form: stats.find((s: any) => s.name === "overall")?.displayValue || "",
+          zone: entry.note?.description || undefined,
+          zoneColor: entry.note?.color || undefined,
+          gamesRemaining: remaining,
+          ppg: gp > 0 ? Math.round((pts / gp) * 100) / 100 : 0,
+          maxPossiblePoints: pts + (remaining * 3),
+        };
+      });
 
-      return {
-        rank: getStat("rank"),
-        teamId,
-        teamName: entry.team?.displayName || entry.team?.name || "",
-        teamAbbreviation: entry.team?.abbreviation || "",
-        teamLogo: entry.team?.logos?.[0]?.href || "",
-        gamesPlayed: gp,
-        wins: getStat("wins"),
-        draws: getStat("ties"),
-        losses: getStat("losses"),
-        goalsFor: getStat("pointsFor"),
-        goalsAgainst: getStat("pointsAgainst"),
-        goalDifference: getStat("pointDifferential"),
-        points: pts,
-        form: stats.find((s: any) => s.name === "overall")?.displayValue || "",
-        recentForm: formMap.get(teamId) || undefined,
-        zone: entry.note?.description || undefined,
-        zoneColor: entry.note?.color || undefined,
-        gamesRemaining: remaining,
-        ppg: gp > 0 ? Math.round((pts / gp) * 100) / 100 : 0,
-        maxPossiblePoints: pts + (remaining * 3),
-      };
-    });
-
-    standings.sort((a, b) => a.rank - b.rank);
-    setCache(cacheKey, standings);
-    return standings;
-  } catch (error) {
-    console.error(`Error fetching standings for ${slug}:`, error);
-    return [];
-  }
+      standings.sort((a, b) => a.rank - b.rank);
+      return standings;
+    } catch (error) {
+      console.error(`Error fetching standings for ${slug}:`, error);
+      return [];
+    }
+  }, { shouldCache: (standings) => standings.length > 0 });
 }
 
-// Fetch matches for a date range, with form and odds
-async function fetchMatchesForDates(slug: LeagueSlug, dates: string[]): Promise<Match[]> {
-  const allMatches: Match[] = [];
-  // Also build a rank lookup from standings
+function parseScoreboardEvents(events: any[], rankMap: Map<string, number>): Match[] {
+  const matches: Match[] = [];
+
+  for (const event of events) {
+    const comp = event.competitions?.[0];
+    const competitors = comp?.competitors || [];
+    const home = competitors.find((c: any) => c.homeAway === "home") || competitors[0];
+    const away = competitors.find((c: any) => c.homeAway === "away") || competitors[1];
+    const status = comp?.status?.type;
+    const odds = extractOdds(comp);
+
+    const match: Match = {
+      id: event.id || "",
+      date: event.date || "",
+      status: status?.description || "Scheduled",
+      statusDetail: status?.detail || undefined,
+      homeTeam: {
+        id: home?.team?.id || "",
+        name: home?.team?.displayName || home?.team?.name || "",
+        abbreviation: home?.team?.abbreviation || "",
+        logo: home?.team?.logo || "",
+        score: home?.score != null ? Number(home.score) : null,
+        form: home?.form || undefined,
+        rank: rankMap.get(home?.team?.id) || undefined,
+      },
+      awayTeam: {
+        id: away?.team?.id || "",
+        name: away?.team?.displayName || away?.team?.name || "",
+        abbreviation: away?.team?.abbreviation || "",
+        logo: away?.team?.logo || "",
+        score: away?.score != null ? Number(away.score) : null,
+        form: away?.form || undefined,
+        rank: rankMap.get(away?.team?.id) || undefined,
+      },
+      odds,
+    };
+
+    if (status?.completed && odds) {
+      const upset = detectUpset(match);
+      match.isUpset = upset.isUpset;
+      match.upsetDetails = upset.upsetDetails;
+    }
+
+    matches.push(match);
+  }
+
+  return matches;
+}
+
+async function fetchMatchesForDateRange(slug: LeagueSlug, start: Date, end: Date): Promise<Match[]> {
   const standings = await fetchStandings(slug);
   const rankMap = new Map<string, number>();
   standings.forEach(s => rankMap.set(s.teamId, s.rank));
 
-  for (const date of dates) {
-    try {
-      const data = await fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${slug}/scoreboard?dates=${date}`);
-      const events = data?.events || [];
+  const chunks: Array<[Date, Date]> = [];
+  let cursor = new Date(start.getTime());
+  while (cursor < end) {
+    const chunkEnd = addDays(cursor, 14);
+    chunks.push([new Date(cursor.getTime()), chunkEnd < end ? chunkEnd : new Date(end.getTime())]);
+    cursor = addDays(chunkEnd, 1);
+  }
 
-      for (const event of events) {
-        const comp = event.competitions?.[0];
-        const competitors = comp?.competitors || [];
-        const home = competitors.find((c: any) => c.homeAway === "home") || competitors[0];
-        const away = competitors.find((c: any) => c.homeAway === "away") || competitors[1];
-        const status = comp?.status?.type;
-        const odds = extractOdds(comp);
+  const results = await Promise.allSettled(
+    chunks.map(([from, to]) => {
+      const range = `${yyyymmdd(from)}-${yyyymmdd(to)}`;
+      return fetchJSON(
+        `${ESPN_BASE}/site/v2/sports/soccer/${slug}/scoreboard?dates=${range}&limit=300`,
+      );
+    }),
+  );
 
-        const match: Match = {
-          id: event.id || "",
-          date: event.date || "",
-          status: status?.description || "Scheduled",
-          statusDetail: status?.detail || undefined,
-          homeTeam: {
-            id: home?.team?.id || "",
-            name: home?.team?.displayName || home?.team?.name || "",
-            abbreviation: home?.team?.abbreviation || "",
-            logo: home?.team?.logo || "",
-            score: home?.score != null ? Number(home.score) : null,
-            form: home?.form || undefined,
-            rank: rankMap.get(home?.team?.id) || undefined,
-          },
-          awayTeam: {
-            id: away?.team?.id || "",
-            name: away?.team?.displayName || away?.team?.name || "",
-            abbreviation: away?.team?.abbreviation || "",
-            logo: away?.team?.logo || "",
-            score: away?.score != null ? Number(away.score) : null,
-            form: away?.form || undefined,
-            rank: rankMap.get(away?.team?.id) || undefined,
-          },
-          odds,
-        };
-
-        // Detect upsets for completed matches
-        if (status?.completed && odds) {
-          const upset = detectUpset(match);
-          match.isUpset = upset.isUpset;
-          match.upsetDetails = upset.upsetDetails;
-        }
-
-        allMatches.push(match);
-      }
-    } catch (error) {
-      // Skip date if fetch fails
-      console.error(`Error fetching matches for ${slug} on ${date}:`, error);
+  const seen = new Set<string>();
+  const matches: Match[] = [];
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const match of parseScoreboardEvents(result.value?.events || [], rankMap)) {
+      if (!match.id || seen.has(match.id)) continue;
+      seen.add(match.id);
+      matches.push(match);
     }
   }
-
-  return allMatches;
+  return matches;
 }
 
-export async function fetchRecentMatches(slug: LeagueSlug): Promise<Match[]> {
-  const cacheKey = `recent:${slug}`;
-  const cached = getCached<Match[]>(cacheKey, getCacheTTL());
-  if (cached) return cached;
-
-  // Fetch last 14 days to get recent completed matches
-  const now = new Date();
-  const dates: string[] = [];
-  for (let i = 0; i < 14; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    dates.push(d.toISOString().slice(0, 10).replace(/-/g, ""));
-  }
-
-  const matches = await fetchMatchesForDates(slug, dates);
-  // Filter to completed only, sort newest first
-  const completed = matches
-    .filter(m => m.status.toLowerCase().includes("full") || m.status.toLowerCase().includes("final"))
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-  setCache(cacheKey, completed);
-  return completed;
+interface LeagueMatches {
+  recent: Match[];
+  upcoming: Match[];
 }
 
-export async function fetchUpcomingMatches(slug: LeagueSlug): Promise<Match[]> {
-  const cacheKey = `upcoming:${slug}`;
-  const cached = getCached<Match[]>(cacheKey, getCacheTTL());
-  if (cached) return cached;
+function isCompletedStatus(status: string): boolean {
+  const st = status.toLowerCase();
+  return st.includes("full") || st.includes("final");
+}
 
-  // Fetch next 14 days
-  const now = new Date();
-  const dates: string[] = [];
-  for (let i = 0; i <= 14; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + i);
-    dates.push(d.toISOString().slice(0, 10).replace(/-/g, ""));
+function isUpcomingStatus(status: string): boolean {
+  const st = status.toLowerCase();
+  return st.includes("scheduled") || st.includes("pre") || st.includes("postponed");
+}
+
+async function fetchLeagueMatches(slug: LeagueSlug): Promise<LeagueMatches> {
+  return cached(`matches:${slug}`, getCacheTTL(), async () => {
+    const now = new Date();
+    const matches = await fetchMatchesForDateRange(slug, addDays(now, -45), addDays(now, 14));
+    const recent = matches
+      .filter(m => isCompletedStatus(m.status))
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const upcoming = matches
+      .filter(m => isUpcomingStatus(m.status))
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return { recent, upcoming };
+  });
+}
+
+function applyRecentForm(standings: StandingEntry[], recentMatches: Match[]): void {
+  for (const team of standings) {
+    const teamMatches = recentMatches
+      .filter(m => m.homeTeam.id === team.teamId || m.awayTeam.id === team.teamId)
+      .slice(0, 5);
+    if (teamMatches.length === 0) continue;
+    team.recentForm = teamMatches.map(m => {
+      const isHome = m.homeTeam.id === team.teamId;
+      const teamScore = isHome ? (m.homeTeam.score ?? 0) : (m.awayTeam.score ?? 0);
+      const oppScore = isHome ? (m.awayTeam.score ?? 0) : (m.homeTeam.score ?? 0);
+      if (teamScore > oppScore) return "W";
+      if (teamScore < oppScore) return "L";
+      return "D";
+    }).join("");
   }
-
-  const matches = await fetchMatchesForDates(slug, dates);
-  // Filter to scheduled/upcoming only
-  const upcoming = matches
-    .filter(m => {
-      const st = m.status.toLowerCase();
-      return st.includes("scheduled") || st.includes("pre") || st.includes("postponed");
-    })
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-  setCache(cacheKey, upcoming);
-  return upcoming;
 }
 
 // Hardcoded fallback odds in case Kalshi API is unavailable
@@ -494,17 +434,26 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
   const firstRelTeam = standings[totalTeams - relSpots]; // first team in relegation
   const lastSafeTeam = standings[totalTeams - relSpots - 1]; // last team above relegation
 
-  // Always show at least bottom 6 teams, expand up to 8 if within 8pts of the drop zone
+  // Always show at least bottom 6 teams, expand up to 8 if within 8pts of the drop zone.
+  // Early in the season the whole table can sit inside that point gap, so never
+  // pull in teams above the 8th-from-bottom window, and always keep the BOTTOM
+  // of the collected list (not slice(0, 8) after sorting by rank, which would
+  // show the leaders).
   const MIN_REL_TEAMS = 6;
   const MAX_REL_TEAMS = 8;
   const REL_POINT_GAP = 8; // points above the relegation line to include
+  const minRelRank = totalTeams - MAX_REL_TEAMS + 1; // 13th in a 20-team league
 
   const relTeams: StandingEntry[] = [];
   for (let i = standings.length - 1; i >= 0; i--) {
     const team = standings[i];
     const isInRelZone = team.zone?.toLowerCase().includes("relegation");
-    const isBottomN = team.rank > totalTeams - MIN_REL_TEAMS; // always include bottom 6
-    const isWithinPointGap = firstRelTeam && team.points - firstRelTeam.points <= REL_POINT_GAP;
+    const isBottomN = team.rank >= totalTeams - MIN_REL_TEAMS + 1; // always include bottom 6
+    const isWithinPointGap = Boolean(
+      firstRelTeam &&
+      team.rank >= minRelRank &&
+      team.points - firstRelTeam.points <= REL_POINT_GAP,
+    );
 
     if (isInRelZone || isBottomN || isWithinPointGap) {
       const relOdds = kalshiOdds
@@ -545,7 +494,7 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
   battles.push({
     type: "relegation",
     label: "Relegation Battle",
-    teams: relTeams.slice(0, MAX_REL_TEAMS),
+    teams: relTeams.slice(-MAX_REL_TEAMS),
     gapFromTarget: relGap,
     insight: relInsight,
     isCompetitive: relGap <= 6,
@@ -555,113 +504,111 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
 }
 
 export async function fetchNews(slug: LeagueSlug): Promise<Article[]> {
-  const cacheKey = `news:${slug}`;
-  const cached = getCached<Article[]>(cacheKey, 15 * 60 * 1000);
-  if (cached) return cached;
-
-  try {
-    const data = await fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${slug}/news`);
-    const articles: Article[] = (data?.articles || []).map((a: any) => ({
-      id: String(a.id || ""),
-      headline: a.headline || "",
-      description: a.description || "",
-      published: a.published || "",
-      url: a.links?.web?.href || a.links?.api?.news?.href || "",
-      imageUrl: a.images?.[0]?.url || undefined,
-      source: "ESPN",
-      type: a.type || "Article",
-    }));
-
-    setCache(cacheKey, articles);
-    return articles;
-  } catch (error) {
-    console.error(`Error fetching news for ${slug}:`, error);
-    return [];
-  }
+  return cached(`news:${slug}`, 15 * 60 * 1000, async () => {
+    try {
+      const data = await fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${slug}/news`);
+      return (data?.articles || []).map((a: any) => ({
+        id: String(a.id || ""),
+        headline: a.headline || "",
+        description: a.description || "",
+        published: a.published || "",
+        url: a.links?.web?.href || a.links?.api?.news?.href || "",
+        imageUrl: a.images?.[0]?.url || undefined,
+        source: "ESPN",
+        type: a.type || "Article",
+      }));
+    } catch (error) {
+      console.error(`Error fetching news for ${slug}:`, error);
+      return [];
+    }
+  }, { staleMs: 2 * 60 * 60 * 1000, shouldCache: (articles) => articles.length > 0 });
 }
 
 export async function fetchBBCNews(): Promise<Article[]> {
-  const cacheKey = "bbc-news";
-  const cached = getCached<Article[]>(cacheKey, 30 * 60 * 1000);
-  if (cached) return cached;
-
-  try {
-    const res = await fetch("https://feeds.bbci.co.uk/sport/football/rss.xml");
-    const text = await res.text();
-
-    const articles: Article[] = [];
-    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-    let match;
-    while ((match = itemRegex.exec(text)) !== null) {
-      const item = match[1];
-      const getTag = (tag: string): string => {
-        const m = item.match(new RegExp(`<${tag}[^>]*>(?:<!\\\[CDATA\\\[)?(.*?)(?:\\\]\\\]>)?</${tag}>`));
-        return m ? m[1].trim() : "";
-      };
-
-      const mediaUrl = item.match(/url="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|gif|webp))"/)?.[1] || "";
-
-      articles.push({
-        id: `bbc-${articles.length}`,
-        headline: getTag("title"),
-        description: getTag("description"),
-        published: getTag("pubDate"),
-        url: getTag("link"),
-        imageUrl: mediaUrl || undefined,
-        source: "BBC Sport",
-        type: "Article",
+  return cached("bbc-news", 30 * 60 * 1000, async () => {
+    try {
+      const res = await fetch("https://feeds.bbci.co.uk/sport/football/rss.xml", {
+        signal: AbortSignal.timeout(12_000),
       });
-    }
+      const text = await res.text();
 
-    setCache(cacheKey, articles);
-    return articles;
-  } catch (error) {
-    console.error("Error fetching BBC news:", error);
-    return [];
-  }
+      const articles: Article[] = [];
+      const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+      let match;
+      while ((match = itemRegex.exec(text)) !== null) {
+        const item = match[1];
+        const getTag = (tag: string): string => {
+          const m = item.match(new RegExp(`<${tag}[^>]*>(?:<!\\\[CDATA\\\[)?(.*?)(?:\\\]\\\]>)?</${tag}>`));
+          return m ? m[1].trim() : "";
+        };
+
+        const mediaUrl = item.match(/url="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|gif|webp))"/)?.[1] || "";
+
+        articles.push({
+          id: `bbc-${articles.length}`,
+          headline: getTag("title"),
+          description: getTag("description"),
+          published: getTag("pubDate"),
+          url: getTag("link"),
+          imageUrl: mediaUrl || undefined,
+          source: "BBC Sport",
+          type: "Article",
+        });
+      }
+
+      return articles;
+    } catch (error) {
+      console.error("Error fetching BBC news:", error);
+      return [];
+    }
+  }, { staleMs: 2 * 60 * 60 * 1000, shouldCache: (articles) => articles.length > 0 });
 }
 
 // Competition tracker: find which teams are still active in cup/European competitions
 type CompEntry = { slug: string; name: string; shortName: string; stage?: string };
 
-async function fetchActiveCompetitions(slug: LeagueSlug): Promise<Map<string, CompEntry[]>> {
-  const cacheKey = `comps:${slug}`;
-  const cached = getCached<Map<string, CompEntry[]>>(cacheKey, 60 * 60 * 1000); // 1hr cache for competitions
-  if (cached) return cached;
+const ALL_COMP_SLUGS = Array.from(new Set([
+  ...Object.values(LEAGUE_CUPS).flat(),
+  ...EURO_COMPS,
+]));
 
-  const teamComps = new Map<string, CompEntry[]>();
-
-  // Determine which competitions to check
-  const compSlugs = [...(LEAGUE_CUPS[slug] || []), ...EURO_COMPS];
-
-  // For each competition, scan upcoming dates to find remaining teams
+async function fetchCompetitionEvents(compSlug: string): Promise<any[]> {
   const now = new Date();
-  const dates: string[] = [];
-  for (let i = 0; i <= 60; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + i);
-    dates.push(d.toISOString().slice(0, 10).replace(/-/g, ""));
+  const ranges = [
+    `${yyyymmdd(now)}-${yyyymmdd(addDays(now, 30))}`,
+    `${yyyymmdd(addDays(now, 31))}-${yyyymmdd(addDays(now, 90))}`,
+  ];
+
+  const results = await Promise.allSettled(
+    ranges.map(range =>
+      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${compSlug}/scoreboard?dates=${range}&limit=200`)
+    )
+  );
+
+  const events: any[] = [];
+  const seen = new Set<string>();
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const event of result.value?.events || []) {
+      if (!event?.id || seen.has(event.id)) continue;
+      seen.add(event.id);
+      events.push(event);
+    }
   }
+  return events;
+}
 
-  // Fetch each competition in parallel
-  const compPromises = compSlugs.map(async (compSlug) => {
-    const compConfig = COMPETITIONS[compSlug];
-    if (!compConfig) return;
+async function fetchAllActiveCompetitions(): Promise<Map<string, CompEntry[]>> {
+  return cached("comps:all", 60 * 60 * 1000, async () => {
+    const teamComps = new Map<string, CompEntry[]>();
 
-    try {
-      // Check dates for upcoming fixtures
-      // Daily for first 35 days (covers all near-term cup rounds), then every 5th day
-      const results = await Promise.allSettled(
-        dates.filter((_, i) => i <= 45 || i % 5 === 0).map(date =>
-          fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${compSlug}/scoreboard?dates=${date}`)
-        )
-      );
+    await Promise.all(ALL_COMP_SLUGS.map(async (compSlug) => {
+      const compConfig = COMPETITIONS[compSlug];
+      if (!compConfig) return;
 
-      const seenTeams = new Set<string>();
-
-      for (const result of results) {
-        if (result.status !== "fulfilled") continue;
-        const events = result.value?.events || [];
+      try {
+        const events = await fetchCompetitionEvents(compSlug);
+        const seenTeams = new Set<string>();
 
         for (const event of events) {
           const stage = event.season?.slug || "";
@@ -671,7 +618,6 @@ async function fetchActiveCompetitions(slug: LeagueSlug): Promise<Map<string, Co
           for (const c of comps) {
             const teamId = c.team?.id;
             const teamName = c.team?.displayName || "";
-            // Skip placeholder teams like "Round of 16 1 Winner"
             if (!teamId || teamName.includes("Winner") || teamName.includes("TBD")) continue;
             if (seenTeams.has(teamId)) continue;
             seenTeams.add(teamId);
@@ -684,36 +630,33 @@ async function fetchActiveCompetitions(slug: LeagueSlug): Promise<Map<string, Co
             };
 
             const existing = teamComps.get(teamId) || [];
-            // Don't add duplicate competitions
             if (!existing.some(e => e.slug === compSlug)) {
               existing.push(entry);
               teamComps.set(teamId, existing);
             }
           }
         }
+      } catch (error) {
+        console.error(`Error scanning competition ${compSlug}:`, error);
       }
-    } catch (error) {
-      console.error(`Error scanning competition ${compSlug}:`, error);
-    }
-  });
+    }));
 
-  await Promise.all(compPromises);
-  setCache(cacheKey, teamComps);
-  return teamComps;
+    return teamComps;
+  }, { staleMs: 6 * 60 * 60 * 1000, shouldCache: (map) => map.size > 0 });
 }
 
-export async function fetchLeagueData(slug: LeagueSlug): Promise<LeagueData> {
+async function buildLeagueData(slug: LeagueSlug): Promise<LeagueData> {
   const config = LEAGUES[slug];
-  const [standings, recentMatches, upcomingMatches, news, activeComps, kalshiOdds] = await Promise.all([
+  const [standingsRaw, matches, news, activeComps, kalshiOdds] = await Promise.all([
     fetchStandings(slug),
-    fetchRecentMatches(slug),
-    fetchUpcomingMatches(slug),
+    fetchLeagueMatches(slug),
     fetchNews(slug),
-    fetchActiveCompetitions(slug),
+    fetchAllActiveCompetitions(),
     fetchLeagueOdds(slug).catch(() => null),
   ]);
 
-  // Enrich standings with active competition data
+  const standings = standingsRaw.map(s => ({ ...s }));
+
   for (const team of standings) {
     const comps = activeComps.get(team.teamId);
     if (comps && comps.length > 0) {
@@ -721,50 +664,7 @@ export async function fetchLeagueData(slug: LeagueSlug): Promise<LeagueData> {
     }
   }
 
-  // Backfill recentForm from match results for teams missing form data or with < 5 entries.
-  // Fetch a wider date range (45 days) to ensure we find enough matches.
-  const teamsNeedingForm = standings.filter(t => !t.recentForm || t.recentForm.length < 5);
-  let extendedMatches: Match[] = recentMatches;
-  if (teamsNeedingForm.length > 0) {
-    try {
-      const now = new Date();
-      const extDates: string[] = [];
-      for (let i = 14; i < 45; i++) {
-        const d = new Date(now);
-        d.setDate(d.getDate() - i);
-        extDates.push(d.toISOString().slice(0, 10).replace(/-/g, ""));
-      }
-      const extraMatches = await fetchMatchesForDates(slug, extDates);
-      const extraCompleted = extraMatches.filter(m => {
-        const st = m.status.toLowerCase();
-        return st.includes("full") || st.includes("final");
-      });
-      extendedMatches = [...recentMatches, ...extraCompleted]
-        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    } catch {
-      // If extended fetch fails, proceed with what we have
-    }
-  }
-  for (const team of teamsNeedingForm) {
-    const teamMatches = extendedMatches
-      .filter(m => {
-        const st = m.status.toLowerCase();
-        return (st.includes("full") || st.includes("final")) &&
-          (m.homeTeam.id === team.teamId || m.awayTeam.id === team.teamId);
-      })
-      .slice(0, 5);
-    if (teamMatches.length > 0) {
-      const form = teamMatches.map(m => {
-        const isHome = m.homeTeam.id === team.teamId;
-        const teamScore = isHome ? (m.homeTeam.score ?? 0) : (m.awayTeam.score ?? 0);
-        const oppScore = isHome ? (m.awayTeam.score ?? 0) : (m.homeTeam.score ?? 0);
-        if (teamScore > oppScore) return "W";
-        if (teamScore < oppScore) return "L";
-        return "D";
-      }).join("");
-      team.recentForm = form;
-    }
-  }
+  applyRecentForm(standings, matches.recent);
 
   const battles = computeBattles(standings, slug, kalshiOdds || undefined);
   const hasKalshiData = kalshiOdds !== null && (kalshiOdds.title.length > 0 || kalshiOdds.relegation.length > 0);
@@ -776,13 +676,20 @@ export async function fetchLeagueData(slug: LeagueSlug): Promise<LeagueData> {
     flag: config.flag,
     logo: config.logo,
     standings,
-    recentMatches,
-    upcomingMatches,
+    recentMatches: matches.recent,
+    upcomingMatches: matches.upcoming,
     news,
     battles,
     oddsSource: hasKalshiData ? "kalshi" : "fallback",
     lastUpdated: new Date().toISOString(),
   };
+}
+
+export async function fetchLeagueData(slug: LeagueSlug): Promise<LeagueData> {
+  return cached(`league:${slug}`, getCacheTTL(), () => buildLeagueData(slug), {
+    staleMs: 60 * 60 * 1000,
+    shouldCache: (data) => data.standings.length > 0,
+  });
 }
 
 export async function fetchAllLeagues(): Promise<LeagueData[]> {

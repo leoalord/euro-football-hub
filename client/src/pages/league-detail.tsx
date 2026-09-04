@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useCachedQuery } from "@/hooks/use-cached-query";
 import type { LeagueData, StandingEntry, Match, Article, BattleGroup } from "@shared/schema";
 import { Link, useParams } from "wouter";
 import { ArrowLeft, ExternalLink, Clock, Trophy, ChevronUp, ChevronDown, Calendar, Zap, AlertTriangle, TrendingUp, Star, Shield, Crown } from "lucide-react";
@@ -357,13 +357,13 @@ export default function LeagueDetail() {
   const slug = params.slug || "eng.1";
   const { refetchInterval } = useAutoRefresh();
 
-  const { data, isLoading, dataUpdatedAt } = useQuery<LeagueData>({
+  const { data, isFetching, dataUpdatedAt } = useCachedQuery<LeagueData>({
     queryKey: ["/api/league", slug],
     refetchInterval,
     staleTime: 60_000,
   });
 
-  if (isLoading) {
+  if (!data && isFetching) {
     return (
       <div className="min-h-screen bg-background">
         <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-md border-b border-border">

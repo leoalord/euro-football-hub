@@ -1,28 +1,7 @@
 import { DOMESTIC_CUP_CONFIG, type DomesticCupData, type DomesticCupMatch, type DomesticCupFavorite } from "@shared/schema";
+import { cached, getCacheTTL } from "./cache";
 
 const ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
-
-// Simple cache
-interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
-}
-const cache = new Map<string, CacheEntry<any>>();
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-
-function getCached<T>(key: string): T | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL) {
-    cache.delete(key);
-    return null;
-  }
-  return entry.data as T;
-}
-
-function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, timestamp: Date.now() });
-}
 
 // Fetch events from ESPN scoreboard for a domestic cup
 async function fetchCupEvents(espnSlug: string): Promise<any[]> {
@@ -38,6 +17,7 @@ async function fetchCupEvents(espnSlug: string): Promise<any[]> {
           "Accept": "application/json",
           "User-Agent": "EuroFootballHub/2.0",
         },
+        signal: AbortSignal.timeout(12_000),
       }
     );
     if (!res.ok) {
@@ -120,15 +100,10 @@ function inferRound(totalMatches: number, upcomingCount: number, completedCount:
 // ---- Kalshi Tournament Winner Odds ----
 import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
 
-const kalshiCache = new Map<string, CacheEntry<DomesticCupFavorite[]>>();
 const KALSHI_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 async function fetchDomesticCupOdds(kalshiTicker: string, allMatches: DomesticCupMatch[]): Promise<DomesticCupFavorite[]> {
-  const cacheKey = `kalshi:domestic:${kalshiTicker}`;
-  const cached = kalshiCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < KALSHI_CACHE_TTL) return cached.data;
-
-  try {
+  return cached(`kalshi:domestic:${kalshiTicker}`, KALSHI_CACHE_TTL, async () => {
     const markets = await fetchKalshiMarketsRaw(kalshiTicker);
 
     // Normalize: strip diacritics, lowercase, trim
@@ -170,19 +145,12 @@ async function fetchDomesticCupOdds(kalshiTicker: string, allMatches: DomesticCu
 
     const active = favorites.filter(f => !f.isEliminated);
     console.log(`[Kalshi] ${kalshiTicker}: ${active.length} active, ${favorites.length} total`);
-    kalshiCache.set(cacheKey, { data: favorites, timestamp: Date.now() });
     return favorites;
-  } catch (error) {
-    console.error(`[Kalshi] Error fetching domestic cup odds ${kalshiTicker}:`, error);
-    return [];
-  }
+  }, { shouldCache: (favorites) => favorites.length > 0 });
 }
 
 export async function fetchDomesticCupData(slug: string): Promise<DomesticCupData> {
-  const cacheKey = `domestic-cup:${slug}`;
-  const cached = getCached<DomesticCupData>(cacheKey);
-  if (cached) return cached;
-
+  return cached(`domestic-cup:${slug}`, getCacheTTL(), async () => {
   const config = DOMESTIC_CUP_CONFIG[slug];
   if (!config) throw new Error(`Unknown domestic cup: ${slug}`);
 
@@ -295,9 +263,8 @@ export async function fetchDomesticCupData(slug: string): Promise<DomesticCupDat
     favorites,
     lastUpdated: new Date().toISOString(),
   };
-
-  setCache(cacheKey, result);
   return result;
+  }, { staleMs: 60 * 60 * 1000 });
 }
 
 export async function fetchAllDomesticCups(): Promise<DomesticCupData[]> {

@@ -1,28 +1,6 @@
 import type { LeagueSlug } from "@shared/schema";
 import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
-
-// Cache for Kalshi data (refresh every 30 minutes)
-interface KalshiCache<T> {
-  data: T;
-  timestamp: number;
-}
-
-const kalshiCache = new Map<string, KalshiCache<any>>();
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-
-function getCached<T>(key: string): T | null {
-  const entry = kalshiCache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL) {
-    kalshiCache.delete(key);
-    return null;
-  }
-  return entry.data as T;
-}
-
-function setCache<T>(key: string, data: T): void {
-  kalshiCache.set(key, { data, timestamp: Date.now() });
-}
+import { cached } from "./cache";
 
 // Kalshi series tickers mapped to our league slugs
 const TITLE_SERIES: Record<string, string> = {
@@ -141,36 +119,29 @@ function parseMarkets(markets: any[]): KalshiOdds[] {
 }
 
 export async function fetchLeagueOdds(slug: LeagueSlug): Promise<LeagueOdds> {
-  const cacheKey = `kalshi:${slug}`;
-  const cached = getCached<LeagueOdds>(cacheKey);
-  if (cached) return cached;
+  return cached(`kalshi:${slug}`, 30 * 60 * 1000, async () => {
+    const titleSeries = TITLE_SERIES[slug];
+    const relSeries = RELEGATION_SERIES[slug];
 
-  const titleSeries = TITLE_SERIES[slug];
-  const relSeries = RELEGATION_SERIES[slug];
+    const [titleMarkets, relMarkets] = await Promise.all([
+      titleSeries ? fetchKalshiMarkets(titleSeries) : Promise.resolve([]),
+      relSeries ? fetchKalshiMarkets(relSeries) : Promise.resolve([]),
+    ]);
 
-  const [titleMarkets, relMarkets] = await Promise.all([
-    titleSeries ? fetchKalshiMarkets(titleSeries) : Promise.resolve([]),
-    relSeries ? fetchKalshiMarkets(relSeries) : Promise.resolve([]),
-  ]);
+    const odds: LeagueOdds = {
+      title: parseMarkets(titleMarkets),
+      relegation: parseMarkets(relMarkets),
+      lastUpdated: new Date().toISOString(),
+    };
 
-  const odds: LeagueOdds = {
-    title: parseMarkets(titleMarkets),
-    relegation: parseMarkets(relMarkets),
-    lastUpdated: new Date().toISOString(),
-  };
+    const topTitle = odds.title.filter(t => t.probability >= 5).map(t => `${t.teamName}(${t.probability}%)`);
+    const topRel = odds.relegation.filter(t => t.probability >= 5).map(t => `${t.teamName}(${t.probability}%)`);
+    console.log(`[Kalshi] ${slug}: title=[${topTitle.join(", ")}] relegation=[${topRel.join(", ")}]`);
 
-  // Log what we found for debugging
-  const topTitle = odds.title.filter(t => t.probability >= 5).map(t => `${t.teamName}(${t.probability}%)`);
-  const topRel = odds.relegation.filter(t => t.probability >= 5).map(t => `${t.teamName}(${t.probability}%)`);
-  console.log(`[Kalshi] ${slug}: title=[${topTitle.join(", ")}] relegation=[${topRel.join(", ")}]`);
-
-  // Only cache if we got actual data — don't cache empty results from failed API calls
-  if (odds.title.length > 0 || odds.relegation.length > 0) {
-    setCache(cacheKey, odds);
-  } else {
-    console.warn(`[Kalshi] ${slug}: no odds returned, skipping cache to allow retry`);
-  }
-  return odds;
+    return odds;
+  }, {
+    shouldCache: (odds) => odds.title.length > 0 || odds.relegation.length > 0,
+  });
 }
 
 // Match a Kalshi team name to an ESPN team name using fuzzy matching

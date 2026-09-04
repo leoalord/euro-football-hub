@@ -1,28 +1,13 @@
 import { EURO_CUP_CONFIG, type EuropeanCupData, type CupTeam, type CupMatch, type CupTie, type CupRound, type CupFavorite, type MatchOdds } from "@shared/schema";
 import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
+import { cached, getCacheTTL } from "./cache";
 
 const ESPN_BASE = "https://site.api.espn.com/apis";
-
-// ---- Caching ----
-interface CacheEntry<T> { data: T; timestamp: number; }
-const cache = new Map<string, CacheEntry<any>>();
-
-function getCached<T>(key: string, maxAgeMs: number): T | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > maxAgeMs) { cache.delete(key); return null; }
-  return entry.data as T;
-}
-function setCache<T>(key: string, data: T): void { cache.set(key, { data, timestamp: Date.now() }); }
-
-function getCacheTTL(): number {
-  const hour = new Date().getUTCHours();
-  return (hour >= 10 && hour <= 23) ? 5 * 60 * 1000 : 30 * 60 * 1000;
-}
 
 async function fetchJSON(url: string): Promise<any> {
   const res = await fetch(url, {
     headers: { "User-Agent": "EuroFootballHub/2.0", "Accept": "application/json" },
+    signal: AbortSignal.timeout(12_000),
   });
   if (!res.ok) throw new Error(`API error: ${res.status} for ${url}`);
   return res.json();
@@ -54,45 +39,33 @@ const ADVANCE_SERIES: Record<string, string | undefined> = {
 };
 
 async function fetchTournamentOdds(kalshiTicker: string): Promise<KalshiTournamentOdds[]> {
-  const cacheKey = `kalshi:cup:${kalshiTicker}`;
-  const cached = getCached<KalshiTournamentOdds[]>(cacheKey, 30 * 60 * 1000);
-  if (cached) return cached;
+  return cached(`kalshi:cup:${kalshiTicker}`, 30 * 60 * 1000, async () => {
+    try {
+      const markets = await fetchKalshiMarketsRaw(kalshiTicker);
 
-  try {
-    const markets = await fetchKalshiMarketsRaw(kalshiTicker);
+      const odds: KalshiTournamentOdds[] = markets
+        .map((m: any) => ({
+          teamName: m.no_sub_title || m.yes_sub_title || "",
+          probability: Math.round(parseFloat(m.last_price_dollars || "0") * 100),
+          ticker: m.ticker || "",
+          isEliminated: m.status === "finalized" || m.status === "settled",
+        }))
+        .filter((o: KalshiTournamentOdds) => o.teamName);
 
-    const odds: KalshiTournamentOdds[] = markets
-      .map((m: any) => ({
-        teamName: m.no_sub_title || m.yes_sub_title || "",
-        probability: Math.round(parseFloat(m.last_price_dollars || "0") * 100),
-        ticker: m.ticker || "",
-        isEliminated: m.status === "finalized" || m.status === "settled",
-      }))
-      .filter((o: KalshiTournamentOdds) => o.teamName);
-
-    console.log(`[Kalshi] ${kalshiTicker}: ${odds.filter(o => !o.isEliminated).length} active teams`);
-    // Only cache if we got actual data
-    if (odds.length > 0) {
-      setCache(cacheKey, odds);
-    } else {
-      console.warn(`[Kalshi] ${kalshiTicker}: no tournament odds, skipping cache`);
+      console.log(`[Kalshi] ${kalshiTicker}: ${odds.filter(o => !o.isEliminated).length} active teams`);
+      return odds;
+    } catch (error) {
+      console.error(`[Kalshi] Error fetching ${kalshiTicker}:`, error);
+      return [];
     }
-    return odds;
-  } catch (error) {
-    console.error(`[Kalshi] Error fetching ${kalshiTicker}:`, error);
-    return [];
-  }
+  }, { shouldCache: (odds) => odds.length > 0 });
 }
 
 // Fetch per-tie advance odds from Kalshi (e.g., KXUCLADVANCE)
 async function fetchAdvanceOdds(seriesTicker: string | undefined): Promise<KalshiAdvanceOdds[]> {
   if (!seriesTicker) return [];
 
-  const cacheKey = `kalshi:advance:${seriesTicker}`;
-  const cached = getCached<KalshiAdvanceOdds[]>(cacheKey, 15 * 60 * 1000);
-  if (cached) return cached;
-
-  try {
+  return cached(`kalshi:advance:${seriesTicker}`, 15 * 60 * 1000, async () => {
     const markets = await fetchKalshiMarketsRaw(seriesTicker);
 
     // Group markets by title (each tie has 2 markets)
@@ -122,12 +95,8 @@ async function fetchAdvanceOdds(seriesTicker: string | undefined): Promise<Kalsh
 
     const active = results.filter(r => !r.isSettled);
     console.log(`[Kalshi] ${seriesTicker}: ${active.length} active advance ties, ${results.length} total`);
-    setCache(cacheKey, results);
     return results;
-  } catch (error) {
-    console.error(`[Kalshi] Error fetching advance odds ${seriesTicker}:`, error);
-    return [];
-  }
+  }, { shouldCache: (results) => results.length > 0 });
 }
 
 // Derive implied advance odds from tournament winner probabilities
@@ -269,17 +238,19 @@ async function fetchCupEvents(espnSlug: string): Promise<any[]> {
     "20260601-20260615",
   ];
 
-  for (const range of dateRanges) {
-    try {
-      const data = await fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}`);
-      for (const event of data.events || []) {
-        if (!seenIds.has(event.id)) {
-          seenIds.add(event.id);
-          allEvents.push(event);
-        }
+  const results = await Promise.allSettled(
+    dateRanges.map(range =>
+      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}`)
+    )
+  );
+
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const event of result.value?.events || []) {
+      if (!seenIds.has(event.id)) {
+        seenIds.add(event.id);
+        allEvents.push(event);
       }
-    } catch (e) {
-      // Some date ranges may have no events
     }
   }
 
@@ -587,86 +558,71 @@ function buildFavorites(kalshiOdds: KalshiTournamentOdds[], ties: CupTie[]): Cup
 // ---- Main Export ----
 
 export async function fetchEuropeanCupData(slug: string): Promise<EuropeanCupData> {
-  const cacheKey = `eurocup:${slug}`;
-  const cached = getCached<EuropeanCupData>(cacheKey, getCacheTTL());
-  if (cached) return cached;
+  return cached(`eurocup:${slug}`, getCacheTTL(), async () => {
+    const config = EURO_CUP_CONFIG[slug];
+    if (!config) throw new Error(`Unknown European cup: ${slug}`);
 
-  const config = EURO_CUP_CONFIG[slug];
-  if (!config) throw new Error(`Unknown European cup: ${slug}`);
+    const advanceTicker = ADVANCE_SERIES[slug];
+    const [events, kalshiOdds, advanceOdds] = await Promise.all([
+      fetchCupEvents(config.espnSlug),
+      fetchTournamentOdds(config.kalshiTicker).catch(() => []),
+      fetchAdvanceOdds(advanceTicker).catch(() => [] as KalshiAdvanceOdds[]),
+    ]);
 
-  // Fetch ESPN events, Kalshi tournament odds, and advance odds in parallel
-  const advanceTicker = ADVANCE_SERIES[slug];
-  const [events, kalshiOdds, advanceOdds] = await Promise.all([
-    fetchCupEvents(config.espnSlug),
-    fetchTournamentOdds(config.kalshiTicker).catch(() => []),
-    fetchAdvanceOdds(advanceTicker).catch(() => [] as KalshiAdvanceOdds[]),
-  ]);
+    console.log(`[EuroCup] ${config.shortName}: ${events.length} events, ${kalshiOdds.length} Kalshi markets, ${advanceOdds.length} advance markets`);
 
-  console.log(`[EuroCup] ${config.shortName}: ${events.length} events, ${kalshiOdds.length} Kalshi markets, ${advanceOdds.length} advance markets`);
+    const roundsData = groupIntoTies(events, kalshiOdds, advanceOdds);
 
-  // Group into rounds and ties
-  const roundsData = groupIntoTies(events, kalshiOdds, advanceOdds);
-
-  // Build CupRound objects — filter out placeholder rounds (where teams are "TBD Winner")
-  const allTies: CupTie[] = [];
-  const rounds: CupRound[] = roundsData
-    .filter(r => {
-      // Keep rounds where at least one tie has real team names (not placeholder)
-      return r.ties.some(t => 
-        !t.team1.name.includes("Winner") && !t.team2.name.includes("Winner")
-      );
-    })
-    .map(r => {
-      // Filter out placeholder ties within a round
-      const realTies = r.ties.filter(t => 
-        !t.team1.name.includes("Winner") && !t.team2.name.includes("Winner")
-      );
-      allTies.push(...realTies);
-      const hasActive = realTies.some(t => !t.isComplete);
-      return {
-        name: r.roundName,
-        ties: realTies,
-        isCurrent: hasActive,
-      };
-    });
-  // Also add placeholder rounds but with empty ties for bracket visualization
-  for (const r of roundsData) {
-    const hasPlaceholders = r.ties.some(t => t.team1.name.includes("Winner") || t.team2.name.includes("Winner"));
-    const alreadyAdded = rounds.some(existing => existing.name === r.roundName);
-    if (hasPlaceholders && !alreadyAdded) {
-      rounds.push({
-        name: r.roundName,
-        ties: [], // Empty — future round
-        isCurrent: false,
+    const allTies: CupTie[] = [];
+    const rounds: CupRound[] = roundsData
+      .filter(r => {
+        return r.ties.some(t =>
+          !t.team1.name.includes("Winner") && !t.team2.name.includes("Winner")
+        );
+      })
+      .map(r => {
+        const realTies = r.ties.filter(t =>
+          !t.team1.name.includes("Winner") && !t.team2.name.includes("Winner")
+        );
+        allTies.push(...realTies);
+        const hasActive = realTies.some(t => !t.isComplete);
+        return {
+          name: r.roundName,
+          ties: realTies,
+          isCurrent: hasActive,
+        };
       });
+    for (const r of roundsData) {
+      const hasPlaceholders = r.ties.some(t => t.team1.name.includes("Winner") || t.team2.name.includes("Winner"));
+      const alreadyAdded = rounds.some(existing => existing.name === r.roundName);
+      if (hasPlaceholders && !alreadyAdded) {
+        rounds.push({
+          name: r.roundName,
+          ties: [],
+          isCurrent: false,
+        });
+      }
     }
-  }
 
-  // If no round is current (all complete), mark the last one
-  if (rounds.length > 0 && !rounds.some(r => r.isCurrent)) {
-    rounds[rounds.length - 1].isCurrent = true;
-  }
+    if (rounds.length > 0 && !rounds.some(r => r.isCurrent)) {
+      rounds[rounds.length - 1].isCurrent = true;
+    }
 
-  // Determine current round name
-  const currentRound = rounds.find(r => r.isCurrent)?.name || "TBD";
+    const currentRound = rounds.find(r => r.isCurrent)?.name || "TBD";
+    const favorites = buildFavorites(kalshiOdds, allTies);
 
-  // Build favorites
-  const favorites = buildFavorites(kalshiOdds, allTies);
-
-  const result: EuropeanCupData = {
-    slug,
-    name: config.name,
-    shortName: config.shortName,
-    logo: config.logo,
-    currentRound,
-    rounds,
-    favorites,
-    oddsSource: kalshiOdds.length > 0 ? "kalshi" : "none",
-    lastUpdated: new Date().toISOString(),
-  };
-
-  setCache(cacheKey, result);
-  return result;
+    return {
+      slug,
+      name: config.name,
+      shortName: config.shortName,
+      logo: config.logo,
+      currentRound,
+      rounds,
+      favorites,
+      oddsSource: kalshiOdds.length > 0 ? "kalshi" : "none",
+      lastUpdated: new Date().toISOString(),
+    };
+  }, { staleMs: 60 * 60 * 1000 });
 }
 
 export async function fetchAllEuropeanCups(): Promise<EuropeanCupData[]> {

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useCachedQuery } from "@/hooks/use-cached-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { EuropeanCupData, CupTie, CupRound, CupFavorite, CupMatch, DomesticCupData, DomesticCupMatch, DomesticCupFavorite } from "@shared/schema";
 import { Link, useRoute, useLocation } from "wouter";
@@ -1114,13 +1114,13 @@ export default function EuropeanCups() {
   const [routeMatch, routeParams] = useRoute("/cup/:slug");
   const selectedCup = routeMatch ? decodeURIComponent(routeParams!.slug) : null;
 
-  const { data: cups, isLoading, error, dataUpdatedAt } = useQuery<EuropeanCupData[]>({
+  const { data: cups, error, dataUpdatedAt, isFetching } = useCachedQuery<EuropeanCupData[]>({
     queryKey: ["/api/european-cups"],
     refetchInterval,
     staleTime: 60_000,
   });
 
-  const { data: domesticCups, isLoading: domesticLoading } = useQuery<DomesticCupData[]>({
+  const { data: domesticCups } = useCachedQuery<DomesticCupData[]>({
     queryKey: ["/api/domestic-cups"],
     refetchInterval,
     staleTime: 60_000,
@@ -1167,7 +1167,7 @@ export default function EuropeanCups() {
           <div className="flex items-center gap-3">
             {latestUpdate > 0 && (
               <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                <RefreshCw className="w-3 h-3" />
+                <RefreshCw className={`w-3 h-3 ${isFetching ? "animate-spin" : ""}`} />
                 <span>Updated {formatDistanceToNow(latestUpdate, { addSuffix: true })}</span>
               </div>
             )}
@@ -1176,7 +1176,7 @@ export default function EuropeanCups() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {error && (
+        {error && !cups && (
           <div className="text-center py-12">
             <p className="text-destructive text-sm">Failed to load data. Retrying...</p>
           </div>
@@ -1227,9 +1227,9 @@ export default function EuropeanCups() {
                 <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider">European Cups</h2>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {isLoading
+                {!cups
                   ? [...Array(3)].map((_, i) => <CupCardSkeleton key={i} />)
-                  : cups?.map(cup => (
+                  : cups.map(cup => (
                       <CompetitionOverview key={cup.slug} cup={cup} />
                     ))
                 }
@@ -1243,9 +1243,9 @@ export default function EuropeanCups() {
                 <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider">Domestic Cups</h2>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {domesticLoading
+                {!domesticCups
                   ? [...Array(5)].map((_, i) => <CupCardSkeleton key={i} />)
-                  : domesticCups?.map(cup => (
+                  : domesticCups.map(cup => (
                       <Link key={cup.slug} href={`/cup/${encodeURIComponent(cup.slug)}`}>
                         <div className="cursor-pointer">
                           <DomesticCupCard cup={cup} />
