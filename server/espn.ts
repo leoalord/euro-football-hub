@@ -434,17 +434,26 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
   const firstRelTeam = standings[totalTeams - relSpots]; // first team in relegation
   const lastSafeTeam = standings[totalTeams - relSpots - 1]; // last team above relegation
 
-  // Always show at least bottom 6 teams, expand up to 8 if within 8pts of the drop zone
+  // Always show at least bottom 6 teams, expand up to 8 if within 8pts of the drop zone.
+  // Early in the season the whole table can sit inside that point gap, so never
+  // pull in teams above the 8th-from-bottom window, and always keep the BOTTOM
+  // of the collected list (not slice(0, 8) after sorting by rank, which would
+  // show the leaders).
   const MIN_REL_TEAMS = 6;
   const MAX_REL_TEAMS = 8;
   const REL_POINT_GAP = 8; // points above the relegation line to include
+  const minRelRank = totalTeams - MAX_REL_TEAMS + 1; // 13th in a 20-team league
 
   const relTeams: StandingEntry[] = [];
   for (let i = standings.length - 1; i >= 0; i--) {
     const team = standings[i];
     const isInRelZone = team.zone?.toLowerCase().includes("relegation");
-    const isBottomN = team.rank > totalTeams - MIN_REL_TEAMS; // always include bottom 6
-    const isWithinPointGap = firstRelTeam && team.points - firstRelTeam.points <= REL_POINT_GAP;
+    const isBottomN = team.rank >= totalTeams - MIN_REL_TEAMS + 1; // always include bottom 6
+    const isWithinPointGap = Boolean(
+      firstRelTeam &&
+      team.rank >= minRelRank &&
+      team.points - firstRelTeam.points <= REL_POINT_GAP,
+    );
 
     if (isInRelZone || isBottomN || isWithinPointGap) {
       const relOdds = kalshiOdds
@@ -485,7 +494,7 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
   battles.push({
     type: "relegation",
     label: "Relegation Battle",
-    teams: relTeams.slice(0, MAX_REL_TEAMS),
+    teams: relTeams.slice(-MAX_REL_TEAMS),
     gapFromTarget: relGap,
     insight: relInsight,
     isCompetitive: relGap <= 6,
