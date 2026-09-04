@@ -84,7 +84,7 @@ The server now:
 1. **Serves stale data immediately** when the TTL expires, and refreshes ESPN/Kalshi in the background (stale-while-revalidate). Concurrent visitors share one in-flight fetch.
 2. **Warms the cache on boot** and keeps it warm on a timer just under the current TTL, so the first visitor after a deploy rarely waits.
 3. **Collapses ESPN fan-out** — match history is fetched in two-week ranges instead of one request per day, and cup/European remaining-team scans run once globally instead of once per league.
-4. **Sends `Cache-Control`** so browsers can reuse a response for 30 seconds (`stale-while-revalidate` for the rest of the TTL).
+4. **Sends `Cache-Control: private, no-cache`** on API responses so browsers revalidate against the (now fast) server cache rather than keeping a long stale copy.
 5. **Persists the last dashboard/league/cups payload in `localStorage`** so a revisit paints immediately while a background refetch runs.
 
 TTL is still 5 minutes during typical European match hours (10:00–23:00 UTC) and 30 minutes off-peak. Prediction-market (Kalshi) payloads stay at 15–30 minutes and are not stored when a fetch returns empty, so a failed odds call can retry.

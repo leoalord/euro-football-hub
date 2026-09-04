@@ -1,7 +1,7 @@
 import { useQuery, type QueryKey, type UseQueryOptions, type UseQueryResult } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 
-const PREFIX = "efh-cache:";
+const PREFIX = "efh-cache:v2:";
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function readPersisted<T>(key: QueryKey): T | undefined {

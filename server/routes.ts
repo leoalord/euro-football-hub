@@ -4,11 +4,11 @@ import { LEAGUES, EURO_CUP_CONFIG, leagueSlugs, type LeagueSlug } from "@shared/
 import { fetchAllLeagues, fetchLeagueData, fetchBBCNews } from "./espn";
 import { fetchAllEuropeanCups, fetchEuropeanCupData } from "./european-cups";
 import { fetchAllDomesticCups } from "./domestic-cups";
-import { getCacheTTL } from "./cache";
 
 function setApiCacheHeaders(res: Response) {
-  const ttlSec = Math.max(30, Math.floor(getCacheTTL() / 1000));
-  res.setHeader("Cache-Control", `public, max-age=30, stale-while-revalidate=${ttlSec}`);
+  // Server memory cache is the source of truth; don't let browsers keep a
+  // long stale-while-revalidate copy of /api/* (that hid the relegation fix).
+  res.setHeader("Cache-Control", "private, no-cache");
 }
 
 export async function registerRoutes(
