@@ -1,6 +1,7 @@
 import { EURO_CUP_CONFIG, type EuropeanCupData, type CupTeam, type CupMatch, type CupTie, type CupRound, type CupFavorite, type CupGroupTable, type CupLeaguePhase, type CupStandingRow, type MatchOdds } from "@shared/schema";
 import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
 import { cached, getCacheTTL } from "./cache";
+import { fetchEspnJSON } from "./espn-json";
 import {
   collectRoundHints,
   currentSeasonScoreboardRanges,
@@ -13,15 +14,8 @@ import {
   normalizeRoundName,
 } from "./season";
 
-const ESPN_BASE = "https://site.api.espn.com/apis";
-
-async function fetchJSON(url: string): Promise<any> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "EuroFootballHub/2.0", "Accept": "application/json" },
-    signal: AbortSignal.timeout(12_000),
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status} for ${url}`);
-  return res.json();
+async function fetchJSON(path: string): Promise<any> {
+  return fetchEspnJSON(path);
 }
 
 // ---- Kalshi Tournament Odds ----
@@ -295,7 +289,7 @@ async function fetchCupEvents(espnSlug: string, now = new Date()): Promise<any[]
 
   const results = await Promise.allSettled(
     dateRanges.map(range =>
-      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}&limit=300`)
+      fetchJSON(`/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}&limit=300`)
     )
   );
 
@@ -345,7 +339,7 @@ function parseStandingEntries(entries: any[]): CupStandingRow[] {
 
 async function fetchCupStandings(espnSlug: string): Promise<CupGroupTable[]> {
   try {
-    const data = await fetchJSON(`${ESPN_BASE}/v2/sports/soccer/${espnSlug}/standings`);
+    const data = await fetchJSON(`/v2/sports/soccer/${espnSlug}/standings`);
     const children = Array.isArray(data?.children) && data.children.length > 0
       ? data.children
       : data?.standings ? [data] : [];

@@ -9,6 +9,7 @@ import {
   isLeagueOrGroupPhase,
   isKnockoutRound,
   leaguePhaseZone,
+  collectRoundHints,
 } from "./season.ts";
 
 function assert(cond: unknown, msg: string) {
@@ -43,6 +44,8 @@ assert(!domestic.endsWith("20260701"), `domestic end must not be last season Jul
 assert(domestic.endsWith("20270630"), `domestic should run through season end, got ${domestic}`);
 assert(domestic.startsWith("2026"), `domestic start should be current season, got ${domestic}`);
 
+assert(normalizeRoundName(collectRoundHints({ season: { slug: "league-phase", type: { name: "League Phase" } } })) === "League Phase", "ESPN league-phase slug");
+assert(normalizeRoundName(collectRoundHints({ season: { slug: "first-round" } })) === "First Round", "ESPN first-round slug");
 assert(normalizeRoundName("Regular Season", sept2026) === "League Phase", "regular season → league phase");
 assert(normalizeRoundName("League Stage") === "League Phase", "league stage");
 assert(normalizeRoundName("Group Stage") === "Group Stage", "group stage");

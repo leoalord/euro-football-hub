@@ -1,5 +1,6 @@
 import { DOMESTIC_CUP_CONFIG, type DomesticCupData, type DomesticCupMatch, type DomesticCupFavorite } from "@shared/schema";
 import { cached, getCacheTTL } from "./cache";
+import { fetchEspnJSON } from "./espn-json";
 import {
   collectRoundHints,
   domesticCupScoreboardRange,
@@ -9,28 +10,14 @@ import {
   resolveDomesticRound,
 } from "./season";
 
-const ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
-
 // Fetch current-season events (never last spring's leftover QF/finals).
 async function fetchCupEvents(espnSlug: string, now = new Date()): Promise<any[]> {
   try {
     const season = getFootballSeason(now);
     const range = domesticCupScoreboardRange(now);
-    const res = await fetch(
-      `${ESPN_BASE}/${espnSlug}/scoreboard?dates=${range}&limit=200`,
-      {
-        headers: {
-          "Accept": "application/json",
-          "User-Agent": "EuroFootballHub/2.0",
-        },
-        signal: AbortSignal.timeout(12_000),
-      }
+    const data = await fetchEspnJSON(
+      `/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}&limit=200`,
     );
-    if (!res.ok) {
-      console.error(`[DomesticCup] ESPN error ${res.status} for ${espnSlug}`);
-      return [];
-    }
-    const data = await res.json();
     return (data.events || []).filter((event: any) => {
       if (!event?.date) return false;
       return isInSeason(new Date(event.date), season);
