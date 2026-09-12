@@ -1,6 +1,17 @@
-import { EURO_CUP_CONFIG, type EuropeanCupData, type CupTeam, type CupMatch, type CupTie, type CupRound, type CupFavorite, type MatchOdds } from "@shared/schema";
+import { EURO_CUP_CONFIG, type EuropeanCupData, type CupTeam, type CupMatch, type CupTie, type CupRound, type CupFavorite, type CupGroupTable, type CupLeaguePhase, type CupStandingRow, type MatchOdds } from "@shared/schema";
 import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
 import { cached, getCacheTTL } from "./cache";
+import {
+  collectRoundHints,
+  currentSeasonScoreboardRanges,
+  getFootballSeason,
+  isInSeason,
+  isKnockoutRound,
+  isLeagueOrGroupPhase,
+  isQualifyingRound,
+  leaguePhaseZone,
+  normalizeRoundName,
+} from "./season";
 
 const ESPN_BASE = "https://site.api.espn.com/apis";
 
@@ -221,40 +232,138 @@ function extractOdds(comp: any): MatchOdds | undefined {
   };
 }
 
-// ---- ESPN Bracket Data ----
+// ---- ESPN Bracket / League-phase Data ----
 
-// Fetch all events for a competition across multiple date ranges to get the full knockout phase
-async function fetchCupEvents(espnSlug: string): Promise<any[]> {
+function eventRoundName(event: any): string {
+  const date = event.date ? new Date(event.date) : undefined;
+  return normalizeRoundName(collectRoundHints(event), date);
+}
+
+function parseCupMatchFromEvent(event: any): CupMatch | null {
+  const comp = event.competitions?.[0];
+  if (!comp) return null;
+  const competitors = comp.competitors || [];
+  if (competitors.length < 2) return null;
+
+  const notes = comp.notes || [];
+  const note = notes[0]?.headline || "";
+  const statusName = comp.status?.type?.name || "";
+  const statusDetail = comp.status?.type?.shortDetail || comp.status?.type?.detail || "";
+
+  let leg = "";
+  if (note.includes("1st Leg")) leg = "1st Leg";
+  else if (note.includes("2nd Leg")) leg = "2nd Leg";
+
+  const home = competitors.find((c: any) => c.homeAway === "home") || competitors[0];
+  const away = competitors.find((c: any) => c.homeAway === "away") || competitors[1];
+  const homeName = home.team?.displayName || home.team?.name || "";
+  const awayName = away.team?.displayName || away.team?.name || "";
+  if (homeName.includes("Winner") || awayName.includes("Winner") || homeName.includes("TBD") || awayName.includes("TBD")) {
+    return null;
+  }
+
+  return {
+    id: event.id,
+    date: event.date,
+    status: statusName,
+    statusDetail,
+    homeTeam: {
+      id: home.team.id,
+      name: homeName,
+      abbreviation: home.team.abbreviation || home.team.shortDisplayName || "",
+      logo: home.team.logo || home.team.logos?.[0]?.href || "",
+      score: statusName !== "STATUS_SCHEDULED" ? parseInt(home.score || "0") : null,
+    },
+    awayTeam: {
+      id: away.team.id,
+      name: awayName,
+      abbreviation: away.team.abbreviation || away.team.shortDisplayName || "",
+      logo: away.team.logo || away.team.logos?.[0]?.href || "",
+      score: statusName !== "STATUS_SCHEDULED" ? parseInt(away.score || "0") : null,
+    },
+    leg: leg || undefined,
+    odds: extractOdds(comp),
+  };
+}
+
+// Current-season events only — last spring's knockouts are excluded after July 1.
+async function fetchCupEvents(espnSlug: string, now = new Date()): Promise<any[]> {
   const allEvents: any[] = [];
   const seenIds = new Set<string>();
-
-  // Fetch multiple date ranges to capture all knockout rounds
-  // Knockout playoff starts in Feb, R16 in Mar, QF in Apr, SF in May, Final in May/Jun
-  const dateRanges = [
-    "20260201-20260228",
-    "20260301-20260331",
-    "20260401-20260430",
-    "20260501-20260531",
-    "20260601-20260615",
-  ];
+  const season = getFootballSeason(now);
+  const dateRanges = currentSeasonScoreboardRanges(now);
 
   const results = await Promise.allSettled(
     dateRanges.map(range =>
-      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}`)
+      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}&limit=300`)
     )
   );
 
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
     for (const event of result.value?.events || []) {
-      if (!seenIds.has(event.id)) {
-        seenIds.add(event.id);
-        allEvents.push(event);
-      }
+      if (!event?.id || seenIds.has(event.id)) continue;
+      if (event.date && !isInSeason(new Date(event.date), season)) continue;
+      seenIds.add(event.id);
+      allEvents.push(event);
     }
   }
 
   return allEvents;
+}
+
+function parseStandingEntries(entries: any[]): CupStandingRow[] {
+  return entries.map((entry: any) => {
+    const stats = entry.stats || [];
+    const getStat = (name: string): number => {
+      const stat = stats.find((s: any) => s.name === name);
+      return stat ? Number(stat.value) || 0 : 0;
+    };
+    const rank = getStat("rank") || Number(entry.team?.rank) || 0;
+    const zone = leaguePhaseZone(rank);
+    return {
+      rank,
+      team: {
+        id: entry.team?.id || "",
+        name: entry.team?.displayName || entry.team?.name || "",
+        abbreviation: entry.team?.abbreviation || "",
+        logo: entry.team?.logos?.[0]?.href || entry.team?.logo || "",
+      },
+      gamesPlayed: getStat("gamesPlayed"),
+      wins: getStat("wins"),
+      draws: getStat("ties"),
+      losses: getStat("losses"),
+      goalsFor: getStat("pointsFor"),
+      goalsAgainst: getStat("pointsAgainst"),
+      goalDifference: getStat("pointDifferential"),
+      points: getStat("points"),
+      zone: entry.note?.description || zone.zone,
+      zoneColor: entry.note?.color || zone.zoneColor,
+    };
+  }).filter(row => row.team.id && !row.team.name.includes("Winner"));
+}
+
+async function fetchCupStandings(espnSlug: string): Promise<CupGroupTable[]> {
+  try {
+    const data = await fetchJSON(`${ESPN_BASE}/v2/sports/soccer/${espnSlug}/standings`);
+    const children = Array.isArray(data?.children) && data.children.length > 0
+      ? data.children
+      : data?.standings ? [data] : [];
+
+    const tables: CupGroupTable[] = [];
+    for (const child of children) {
+      const entries = child?.standings?.entries || child?.standings?.[0]?.entries || [];
+      if (!entries.length) continue;
+      tables.push({
+        name: child.name || child.abbreviation || "League Phase",
+        standings: parseStandingEntries(entries).sort((a, b) => a.rank - b.rank),
+      });
+    }
+    return tables;
+  } catch (error) {
+    console.error(`[EuroCup] Standings error for ${espnSlug}:`, error);
+    return [];
+  }
 }
 
 // Group events into ties (two-leg matchups between same teams)
@@ -288,25 +397,12 @@ function groupIntoTies(events: any[], kalshiOdds: KalshiTournamentOdds[], advanc
 
     // Determine the leg/round from notes
     let leg = "";
-    let roundName = "";
     if (note.includes("1st Leg")) leg = "1st Leg";
     else if (note.includes("2nd Leg")) leg = "2nd Leg";
 
-    // Try to determine round from season info or notes
-    const seasonType = event.season?.type?.name || "";
-    if (seasonType) roundName = seasonType;
-
-    // Infer round name from date range or competition structure
-    // ESPN doesn't always provide clear round names, so we'll categorize by date
-    const eventDate = new Date(event.date);
-    const month = eventDate.getMonth(); // 0-indexed
-    if (!roundName) {
-      if (month <= 1) roundName = "Knockout Playoff"; // Feb
-      else if (month <= 2) roundName = "Round of 16"; // Mar
-      else if (month <= 3) roundName = "Quarter-finals"; // Apr
-      else if (month <= 4) roundName = "Semi-finals"; // May
-      else roundName = "Final"; // Jun
-    }
+    const eventDate = event.date ? new Date(event.date) : undefined;
+    const roundName = normalizeRoundName(collectRoundHints(event) || note, eventDate);
+    if (isLeagueOrGroupPhase(roundName) || isQualifyingRound(roundName)) continue;
 
     const home = competitors.find((c: any) => c.homeAway === "home") || competitors[0];
     const away = competitors.find((c: any) => c.homeAway === "away") || competitors[1];
@@ -557,21 +653,101 @@ function buildFavorites(kalshiOdds: KalshiTournamentOdds[], ties: CupTie[]): Cup
 
 // ---- Main Export ----
 
+function splitEventsByPhase(events: any[]): { league: any[]; knockout: any[]; qualifying: any[] } {
+  const league: any[] = [];
+  const knockout: any[] = [];
+  const qualifying: any[] = [];
+
+  for (const event of events) {
+    const roundName = eventRoundName(event);
+    if (isLeagueOrGroupPhase(roundName)) league.push(event);
+    else if (isQualifyingRound(roundName)) qualifying.push(event);
+    else if (isKnockoutRound(roundName)) knockout.push(event);
+    else {
+      // Unknown ESPN label: treat Sep–Jan as league phase, otherwise knockout
+      const date = event.date ? new Date(event.date) : undefined;
+      const fallback = normalizeRoundName("", date);
+      if (isLeagueOrGroupPhase(fallback) || isQualifyingRound(fallback)) {
+        (isQualifyingRound(fallback) ? qualifying : league).push(event);
+      } else {
+        knockout.push(event);
+      }
+    }
+  }
+  return { league, knockout, qualifying };
+}
+
+function buildLeaguePhase(
+  events: any[],
+  tables: CupGroupTable[],
+): CupLeaguePhase | undefined {
+  const matches = events
+    .map(parseCupMatchFromEvent)
+    .filter((m): m is CupMatch => m !== null)
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  if (matches.length === 0 && tables.length === 0) return undefined;
+
+  const upcomingMatches = matches
+    .filter(m => m.status === "STATUS_SCHEDULED" || m.status === "STATUS_POSTPONED")
+    .slice(0, 12);
+  const recentMatches = matches
+    .filter(m => m.status !== "STATUS_SCHEDULED" && m.status !== "STATUS_POSTPONED")
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 10);
+
+  const looksLikeGroups = tables.length > 1 && tables.every(t => /^group\s/i.test(t.name));
+  const label = looksLikeGroups ? "Group Stage" : "League Phase";
+
+  return { label, tables, recentMatches, upcomingMatches };
+}
+
+function leaguePhaseTeamTies(phase: CupLeaguePhase | undefined): CupTie[] {
+  if (!phase) return [];
+  const teams: CupTeam[] = [];
+  const seen = new Set<string>();
+  for (const table of phase.tables) {
+    for (const row of table.standings) {
+      if (seen.has(row.team.id)) continue;
+      seen.add(row.team.id);
+      teams.push(row.team);
+    }
+  }
+  for (const match of [...phase.recentMatches, ...phase.upcomingMatches]) {
+    for (const team of [match.homeTeam, match.awayTeam]) {
+      if (seen.has(team.id)) continue;
+      seen.add(team.id);
+      teams.push({ id: team.id, name: team.name, abbreviation: team.abbreviation, logo: team.logo });
+    }
+  }
+  if (teams.length < 2) return [];
+  return [{
+    team1: teams[0],
+    team2: teams[1],
+    matches: [],
+    isComplete: false,
+  }];
+}
+
 export async function fetchEuropeanCupData(slug: string): Promise<EuropeanCupData> {
   return cached(`eurocup:${slug}`, getCacheTTL(), async () => {
     const config = EURO_CUP_CONFIG[slug];
     if (!config) throw new Error(`Unknown European cup: ${slug}`);
 
+    const season = getFootballSeason();
     const advanceTicker = ADVANCE_SERIES[slug];
-    const [events, kalshiOdds, advanceOdds] = await Promise.all([
+    const [events, kalshiOdds, advanceOdds, standingsTables] = await Promise.all([
       fetchCupEvents(config.espnSlug),
       fetchTournamentOdds(config.kalshiTicker).catch(() => []),
       fetchAdvanceOdds(advanceTicker).catch(() => [] as KalshiAdvanceOdds[]),
+      fetchCupStandings(config.espnSlug).catch(() => [] as CupGroupTable[]),
     ]);
 
-    console.log(`[EuroCup] ${config.shortName}: ${events.length} events, ${kalshiOdds.length} Kalshi markets, ${advanceOdds.length} advance markets`);
+    console.log(`[EuroCup] ${config.shortName} ${season.label}: ${events.length} events, ${standingsTables.length} tables, ${kalshiOdds.length} Kalshi markets`);
 
-    const roundsData = groupIntoTies(events, kalshiOdds, advanceOdds);
+    const { league, knockout, qualifying } = splitEventsByPhase(events);
+    const leaguePhase = buildLeaguePhase(league, standingsTables);
+    const roundsData = groupIntoTies(knockout, kalshiOdds, advanceOdds);
 
     const allTies: CupTie[] = [];
     const rounds: CupRound[] = roundsData
@@ -604,20 +780,47 @@ export async function fetchEuropeanCupData(slug: string): Promise<EuropeanCupDat
       }
     }
 
-    if (rounds.length > 0 && !rounds.some(r => r.isCurrent)) {
+    const hasActiveKnockout = rounds.some(r => r.isCurrent);
+    const hasLeagueActivity = !!(leaguePhase && (
+      leaguePhase.upcomingMatches.length > 0
+      || leaguePhase.recentMatches.length > 0
+      || leaguePhase.tables.some(t => t.standings.length > 0)
+    ));
+    const hasQualifying = qualifying.length > 0 && !hasLeagueActivity && !hasActiveKnockout;
+
+    let phase: EuropeanCupData["phase"] = "knockout";
+    let currentRound = rounds.find(r => r.isCurrent)?.name || "TBD";
+
+    if (hasActiveKnockout) {
+      phase = "knockout";
+    } else if (hasLeagueActivity) {
+      phase = "league";
+      currentRound = leaguePhase!.label;
+      for (const r of rounds) r.isCurrent = false;
+    } else if (hasQualifying) {
+      phase = "qualifying";
+      currentRound = "Qualifying";
+    } else if (rounds.length > 0) {
       rounds[rounds.length - 1].isCurrent = true;
+      currentRound = rounds[rounds.length - 1].name;
+      phase = "knockout";
+    } else if (leaguePhase) {
+      phase = "league";
+      currentRound = leaguePhase.label;
     }
 
-    const currentRound = rounds.find(r => r.isCurrent)?.name || "TBD";
-    const favorites = buildFavorites(kalshiOdds, allTies);
+    const favorites = buildFavorites(kalshiOdds, [...allTies, ...leaguePhaseTeamTies(leaguePhase)]);
 
     return {
       slug,
       name: config.name,
       shortName: config.shortName,
       logo: config.logo,
+      seasonLabel: season.label,
       currentRound,
+      phase,
       rounds,
+      leaguePhase,
       favorites,
       oddsSource: kalshiOdds.length > 0 ? "kalshi" : "none",
       lastUpdated: new Date().toISOString(),

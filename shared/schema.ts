@@ -244,14 +244,50 @@ export const cupFavoriteSchema = z.object({
 
 export type CupFavorite = z.infer<typeof cupFavoriteSchema>;
 
+export const cupStandingRowSchema = z.object({
+  rank: z.number(),
+  team: cupTeamSchema,
+  gamesPlayed: z.number(),
+  wins: z.number(),
+  draws: z.number(),
+  losses: z.number(),
+  goalsFor: z.number(),
+  goalsAgainst: z.number(),
+  goalDifference: z.number(),
+  points: z.number(),
+  zone: z.string().optional(),
+  zoneColor: z.string().optional(),
+});
+
+export type CupStandingRow = z.infer<typeof cupStandingRowSchema>;
+
+export const cupGroupTableSchema = z.object({
+  name: z.string(),
+  standings: z.array(cupStandingRowSchema),
+});
+
+export type CupGroupTable = z.infer<typeof cupGroupTableSchema>;
+
+export const cupLeaguePhaseSchema = z.object({
+  label: z.string(), // "League Phase" | "Group Stage"
+  tables: z.array(cupGroupTableSchema),
+  recentMatches: z.array(cupMatchSchema),
+  upcomingMatches: z.array(cupMatchSchema),
+});
+
+export type CupLeaguePhase = z.infer<typeof cupLeaguePhaseSchema>;
+
 // Full European cup data
 export const europeanCupDataSchema = z.object({
   slug: z.string(), // "uefa.champions", "uefa.europa", "uefa.europa.conf"
   name: z.string(),
   shortName: z.string(),
   logo: z.string().optional(),
-  currentRound: z.string(), // "Round of 16", etc.
+  seasonLabel: z.string().optional(),
+  currentRound: z.string(), // "League Phase", "Round of 16", etc.
+  phase: z.enum(["qualifying", "league", "knockout"]).optional(),
   rounds: z.array(cupRoundSchema),
+  leaguePhase: cupLeaguePhaseSchema.optional(),
   favorites: z.array(cupFavoriteSchema),
   oddsSource: z.string().optional(), // "kalshi" or "none"
   lastUpdated: z.string(),
@@ -309,6 +345,7 @@ export const domesticCupDataSchema = z.object({
   country: z.string(),
   countryFlag: z.string(),
   logo: z.string(),
+  seasonLabel: z.string().optional(),
   currentRound: z.string(),
   recentResults: z.array(domesticCupMatchSchema), // completed matches in current/recent round
   upcomingMatches: z.array(domesticCupMatchSchema), // scheduled future matches
@@ -328,6 +365,7 @@ export const EURO_CUP_CONFIG: Record<string, { name: string; shortName: string; 
 // Domestic cup config
 export const DOMESTIC_CUP_CONFIG: Record<string, { name: string; shortName: string; espnSlug: string; country: string; countryFlag: string; leagueSlug: string; logo: string; kalshiTicker?: string }> = {
   "eng.fa": { name: "FA Cup", shortName: "FA", espnSlug: "eng.fa", country: "England", countryFlag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", leagueSlug: "eng.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/40.png", kalshiTicker: "KXFACUP" },
+  "eng.league_cup": { name: "Carabao Cup", shortName: "CC", espnSlug: "eng.league_cup", country: "England", countryFlag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", leagueSlug: "eng.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/41.png" },
   "ger.dfb_pokal": { name: "DFB-Pokal", shortName: "DFB", espnSlug: "ger.dfb_pokal", country: "Germany", countryFlag: "🇩🇪", leagueSlug: "ger.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/2061.png", kalshiTicker: "KXDFBPOKAL" },
   "ita.coppa_italia": { name: "Coppa Italia", shortName: "CI", espnSlug: "ita.coppa_italia", country: "Italy", countryFlag: "🇮🇹", leagueSlug: "ita.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/2192.png", kalshiTicker: "KXCOPPAITALIA" },
   "esp.copa_del_rey": { name: "Copa del Rey", shortName: "CdR", espnSlug: "esp.copa_del_rey", country: "Spain", countryFlag: "🇪🇸", leagueSlug: "esp.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/80.png", kalshiTicker: "KXCOPADELREY" },

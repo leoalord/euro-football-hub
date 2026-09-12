@@ -1,17 +1,23 @@
 import { DOMESTIC_CUP_CONFIG, type DomesticCupData, type DomesticCupMatch, type DomesticCupFavorite } from "@shared/schema";
 import { cached, getCacheTTL } from "./cache";
+import {
+  collectRoundHints,
+  domesticCupScoreboardRange,
+  getFootballSeason,
+  isInSeason,
+  normalizeRoundName,
+  resolveDomesticRound,
+} from "./season";
 
 const ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
 
-// Fetch events from ESPN scoreboard for a domestic cup
-async function fetchCupEvents(espnSlug: string): Promise<any[]> {
+// Fetch current-season events (never last spring's leftover QF/finals).
+async function fetchCupEvents(espnSlug: string, now = new Date()): Promise<any[]> {
   try {
-    // Fetch recent + upcoming matches (last 2 months through end of season)
-    const now = new Date();
-    const twoMonthsAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
-    const startDate = twoMonthsAgo.toISOString().slice(0, 10).replace(/-/g, "");
+    const season = getFootballSeason(now);
+    const range = domesticCupScoreboardRange(now);
     const res = await fetch(
-      `${ESPN_BASE}/${espnSlug}/scoreboard?dates=${startDate}-20260701&limit=100`,
+      `${ESPN_BASE}/${espnSlug}/scoreboard?dates=${range}&limit=200`,
       {
         headers: {
           "Accept": "application/json",
@@ -25,7 +31,10 @@ async function fetchCupEvents(espnSlug: string): Promise<any[]> {
       return [];
     }
     const data = await res.json();
-    return data.events || [];
+    return (data.events || []).filter((event: any) => {
+      if (!event?.date) return false;
+      return isInSeason(new Date(event.date), season);
+    });
   } catch (error) {
     console.error(`[DomesticCup] Error fetching ${espnSlug}:`, error);
     return [];
@@ -82,19 +91,12 @@ function parseEvent(event: any): DomesticCupMatch | null {
       penaltyScore: parsePenaltyScore(awayComp),
     },
     note: noteText || undefined,
+    round: (() => {
+      const hint = collectRoundHints(event) || noteText;
+      const named = normalizeRoundName(hint);
+      return named && named !== "Unknown" && named !== "League Phase" ? named : undefined;
+    })(),
   };
-}
-
-// Determine the current round name based on number of matches
-function inferRound(totalMatches: number, upcomingCount: number, completedCount: number): string {
-  // For upcoming matches, use the count to determine round
-  const relevantCount = upcomingCount > 0 ? upcomingCount : completedCount;
-  if (relevantCount <= 1) return "Final";
-  if (relevantCount <= 2) return "Semi-Finals";
-  if (relevantCount <= 4) return "Quarter-Finals";
-  if (relevantCount <= 8) return "Round of 16";
-  if (relevantCount <= 16) return "Round of 32";
-  return "Early Rounds";
 }
 
 // ---- Kalshi Tournament Winner Odds ----
@@ -154,8 +156,9 @@ export async function fetchDomesticCupData(slug: string): Promise<DomesticCupDat
   const config = DOMESTIC_CUP_CONFIG[slug];
   if (!config) throw new Error(`Unknown domestic cup: ${slug}`);
 
+  const season = getFootballSeason();
   const events = await fetchCupEvents(config.espnSlug);
-  console.log(`[DomesticCup] ${config.shortName}: ${events.length} events`);
+  console.log(`[DomesticCup] ${config.shortName} ${season.label}: ${events.length} events`);
 
   const allMatches = events
     .map(parseEvent)
@@ -183,21 +186,11 @@ export async function fetchDomesticCupData(slug: string): Promise<DomesticCupDat
     }
   }
 
-  // Determine current round
-  let currentRound: string;
-  if (upcoming.length > 0) {
-    currentRound = inferRound(allMatches.length, upcoming.length, recentResults.length);
-  } else if (recentResults.length > 0) {
-    // If all done and only 1 result, that was the Final
-    currentRound = inferRound(allMatches.length, 0, recentResults.length);
-  } else {
-    currentRound = "TBD";
-  }
-
-  // If we have a final scheduled, override
-  if (upcoming.length === 1) currentRound = "Final";
-  if (upcoming.length === 2) currentRound = "Semi-Finals";
-  if (upcoming.length <= 4 && upcoming.length > 2) currentRound = "Quarter-Finals";
+  const currentRound = resolveDomesticRound(
+    [...upcoming, ...recentResults].map(m => m.round),
+    upcoming.length,
+    recentResults.length,
+  );
 
   // Fetch Kalshi tournament winner odds if available
   let favorites: DomesticCupFavorite[] | undefined;
@@ -257,6 +250,7 @@ export async function fetchDomesticCupData(slug: string): Promise<DomesticCupDat
     country: config.country,
     countryFlag: config.countryFlag,
     logo: config.logo,
+    seasonLabel: season.label,
     currentRound,
     recentResults: recentResults.slice(0, 8), // Limit to 8 most recent
     upcomingMatches: enrichedUpcoming,
