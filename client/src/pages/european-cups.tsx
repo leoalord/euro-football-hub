@@ -1,6 +1,6 @@
 import { useCachedQuery } from "@/hooks/use-cached-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { EuropeanCupData, CupTie, CupRound, CupFavorite, CupMatch, DomesticCupData, DomesticCupMatch, DomesticCupFavorite } from "@shared/schema";
+import type { EuropeanCupData, CupTie, CupRound, CupFavorite, CupMatch, CupLeaguePhase, CupStandingRow, DomesticCupData, DomesticCupMatch, DomesticCupFavorite } from "@shared/schema";
 import { Link, useRoute, useLocation } from "wouter";
 import { RefreshCw, Trophy, ArrowLeft, ChevronRight, Clock, Check, Swords, Crown, Minus, Globe, Flag, List, GitBranch } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,14 @@ const COMP_THEMES: Record<string, { accent: string; accentBg: string; accentBord
 };
 
 // Format match date
+function seasonSubtitle(seasonLabel: string | undefined, currentRound: string): string {
+  return seasonLabel ? `${seasonLabel} · ${currentRound}` : currentRound;
+}
+
+function isLeaguePhaseView(cup: EuropeanCupData): boolean {
+  return cup.phase !== "knockout" && !!cup.leaguePhase;
+}
+
 function formatMatchDate(dateStr: string): string {
   const d = new Date(dateStr);
   if (isToday(d)) return `Today ${format(d, "h:mm a")}`;
@@ -262,6 +270,141 @@ function FavoritesPanel({ favorites, theme, shortName }: { favorites: CupFavorit
   );
 }
 
+function zoneBadgeClass(zone?: string): string {
+  const z = (zone || "").toLowerCase();
+  if (z.includes("r16") || z.includes("qualify") || z.includes("champions")) {
+    return "bg-blue-600/20 text-blue-300 border-blue-500/30";
+  }
+  if (z.includes("playoff") || z.includes("europa") || z.includes("knockout")) {
+    return "bg-amber-600/20 text-amber-300 border-amber-500/30";
+  }
+  if (z.includes("out") || z.includes("elim")) {
+    return "bg-muted text-muted-foreground border-border";
+  }
+  return "bg-muted/40 text-muted-foreground border-border/60";
+}
+
+function LeaguePhaseMatchRow({ match }: { match: CupMatch }) {
+  const isScheduled = match.status === "STATUS_SCHEDULED";
+  const isLive = match.status.includes("PROGRESS") || match.status.includes("HALF");
+  const status = getStatusLabel(match.status);
+
+  return (
+    <div className={`flex items-center gap-1.5 py-1.5 px-2 rounded text-xs ${
+      isLive ? "bg-green-500/5 border border-green-500/20" : "bg-muted/10"
+    }`}>
+      {match.homeTeam.logo && (
+        <img src={match.homeTeam.logo} alt="" className="w-3.5 h-3.5 object-contain flex-shrink-0" loading="lazy" crossOrigin="anonymous" />
+      )}
+      <span className="truncate text-foreground/80">{match.homeTeam.abbreviation || match.homeTeam.name}</span>
+      <span className="text-muted-foreground/50 mx-0.5 flex-shrink-0 tabular-nums">
+        {isScheduled ? "vs" : (
+          <span className="font-medium text-foreground/60">
+            {match.homeTeam.score} - {match.awayTeam.score}
+          </span>
+        )}
+      </span>
+      {match.awayTeam.logo && (
+        <img src={match.awayTeam.logo} alt="" className="w-3.5 h-3.5 object-contain flex-shrink-0" loading="lazy" crossOrigin="anonymous" />
+      )}
+      <span className="truncate text-foreground/80">{match.awayTeam.abbreviation || match.awayTeam.name}</span>
+      <div className="flex-1" />
+      {isLive ? (
+        <span className="text-[9px] font-medium text-green-400">LIVE</span>
+      ) : isScheduled ? (
+        <span className="text-[9px] text-muted-foreground/50">{formatMatchDate(match.date)}</span>
+      ) : (
+        <span className={`text-[9px] ${status.color}`}>{status.label || "FT"}</span>
+      )}
+    </div>
+  );
+}
+
+function LeagueTablePreview({ phase, theme, limit = 8 }: { phase: CupLeaguePhase; theme: typeof COMP_THEMES["UCL"]; limit?: number }) {
+  const table = phase.tables[0];
+  if (!table || table.standings.length === 0) return null;
+  const rows = table.standings.slice(0, limit);
+  const remaining = table.standings.length - rows.length;
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        <Trophy className={`w-3.5 h-3.5 ${theme.accent}`} />
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{phase.label}</span>
+        {phase.tables.length > 1 && (
+          <span className="text-[10px] text-muted-foreground/50">{phase.tables.length} groups</span>
+        )}
+      </div>
+      <div className="space-y-0.5">
+        {rows.map((row) => (
+          <StandingRow key={row.team.id || row.rank} row={row} compact />
+        ))}
+        {remaining > 0 && (
+          <p className="text-[10px] text-muted-foreground/50 text-center pt-1">+ {remaining} more</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StandingRow({ row, compact }: { row: CupStandingRow; compact?: boolean }) {
+  return (
+    <div className="flex items-center gap-2 py-1 px-1">
+      <span className="text-[10px] text-muted-foreground tabular-nums w-4 text-right">{row.rank}</span>
+      {row.team.logo && (
+        <img src={row.team.logo} alt="" className="w-3.5 h-3.5 object-contain" loading="lazy" crossOrigin="anonymous" />
+      )}
+      <span className={`text-[11px] text-foreground/80 flex-1 truncate ${compact ? "" : "text-xs"}`}>
+        {compact ? (row.team.abbreviation || row.team.name) : row.team.name}
+      </span>
+      {!compact && (
+        <>
+          <span className="text-[10px] text-muted-foreground tabular-nums w-5 text-center">{row.gamesPlayed}</span>
+          <span className="text-[10px] text-muted-foreground tabular-nums w-6 text-center">
+            {row.goalDifference > 0 ? `+${row.goalDifference}` : row.goalDifference}
+          </span>
+        </>
+      )}
+      <span className="text-[11px] font-semibold tabular-nums text-foreground w-5 text-right">{row.points}</span>
+      {row.zone && (
+        <span className={`text-[7px] font-bold px-1 rounded border leading-tight ${zoneBadgeClass(row.zone)}`}>
+          {row.zone}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function LeaguePhaseTables({ phase, theme }: { phase: CupLeaguePhase; theme: typeof COMP_THEMES["UCL"] }) {
+  return (
+    <div className="space-y-4">
+      {phase.tables.map((table) => (
+        <Card key={table.name} className="bg-card border-card-border overflow-hidden">
+          <div className="px-4 py-3 border-b border-border">
+            <div className="flex items-center gap-2">
+              <Trophy className={`w-3.5 h-3.5 ${theme.accent}`} />
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{table.name}</span>
+            </div>
+            <div className="flex items-center gap-2 mt-2 text-[9px] text-muted-foreground/50 uppercase tracking-wider">
+              <span className="w-4" />
+              <span className="flex-1">Team</span>
+              <span className="w-5 text-center">GP</span>
+              <span className="w-6 text-center">GD</span>
+              <span className="w-5 text-right">Pts</span>
+              <span className="w-10" />
+            </div>
+          </div>
+          <div className="px-3 py-1 divide-y divide-border/40">
+            {table.standings.map((row) => (
+              <StandingRow key={row.team.id || row.rank} row={row} />
+            ))}
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 // ---- Competition Card (overview mode) ----
 function CompetitionOverview({ cup }: { cup: EuropeanCupData }) {
   const theme = COMP_THEMES[cup.shortName] || COMP_THEMES.UCL;
@@ -269,6 +412,8 @@ function CompetitionOverview({ cup }: { cup: EuropeanCupData }) {
   const activeTies = currentRound?.ties.filter(t => !t.isComplete) || [];
   const completedTies = currentRound?.ties.filter(t => t.isComplete) || [];
   const topFavs = cup.favorites.filter(f => !f.isEliminated && f.tournamentOdds > 0).slice(0, 5);
+  const showLeague = isLeaguePhaseView(cup);
+  const phase = cup.leaguePhase;
 
   return (
     <Card className="bg-card border-card-border overflow-hidden" data-testid={`cup-card-${cup.slug}`}>
@@ -283,15 +428,47 @@ function CompetitionOverview({ cup }: { cup: EuropeanCupData }) {
             )}
             <div>
               <h2 className="font-semibold text-sm text-foreground">{cup.name}</h2>
-              <p className="text-xs text-muted-foreground">{cup.currentRound}</p>
+              <p className="text-xs text-muted-foreground">{seasonSubtitle(cup.seasonLabel, cup.currentRound)}</p>
             </div>
           </div>
           <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-foreground transition-colors" />
         </div>
       </Link>
 
-      {/* Current round matchups */}
-      {currentRound && (
+      {showLeague && phase && (
+        <div className="px-4 py-3 border-b border-border">
+          <LeagueTablePreview phase={phase} theme={theme} limit={8} />
+          {phase.upcomingMatches.length > 0 && (
+            <div className="mt-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Clock className={`w-3.5 h-3.5 ${theme.accent}`} />
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upcoming</span>
+              </div>
+              <div className="space-y-1.5">
+                {phase.upcomingMatches.slice(0, 4).map(match => (
+                  <LeaguePhaseMatchRow key={match.id} match={match} />
+                ))}
+              </div>
+            </div>
+          )}
+          {phase.upcomingMatches.length === 0 && phase.recentMatches.length > 0 && (
+            <div className="mt-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Check className="w-3.5 h-3.5 text-muted-foreground" />
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Recent</span>
+              </div>
+              <div className="space-y-1.5">
+                {phase.recentMatches.slice(0, 4).map(match => (
+                  <LeaguePhaseMatchRow key={match.id} match={match} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Current knockout matchups */}
+      {!showLeague && currentRound && (
         <div className="px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2 mb-2">
             <Swords className={`w-3.5 h-3.5 ${theme.accent}`} />
@@ -673,6 +850,61 @@ function BracketView({ cup, theme }: { cup: EuropeanCupData; theme: typeof COMP_
 function CompetitionDetail({ cup }: { cup: EuropeanCupData }) {
   const theme = COMP_THEMES[cup.shortName] || COMP_THEMES.UCL;
   const [viewMode, setViewMode] = useState<"list" | "bracket">("list");
+  const showLeague = isLeaguePhaseView(cup);
+  const phase = cup.leaguePhase;
+
+  if (showLeague && phase) {
+    return (
+      <div className="max-w-5xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-2 space-y-4">
+            {phase.tables.length > 0 ? (
+              <LeaguePhaseTables phase={phase} theme={theme} />
+            ) : (
+              <Card className="bg-card border-card-border px-4 py-6 text-center">
+                <p className="text-xs text-muted-foreground/60">
+                  {phase.label} table will appear after matchday 1
+                </p>
+              </Card>
+            )}
+            {phase.upcomingMatches.length > 0 && (
+              <Card className="bg-card border-card-border overflow-hidden">
+                <div className="px-4 py-3 border-b border-border">
+                  <div className="flex items-center gap-2">
+                    <Clock className={`w-3.5 h-3.5 ${theme.accent}`} />
+                    <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upcoming</span>
+                  </div>
+                </div>
+                <div className="px-3 py-2 space-y-1.5">
+                  {phase.upcomingMatches.map(match => (
+                    <LeaguePhaseMatchRow key={match.id} match={match} />
+                  ))}
+                </div>
+              </Card>
+            )}
+            {phase.recentMatches.length > 0 && (
+              <Card className="bg-card border-card-border overflow-hidden">
+                <div className="px-4 py-3 border-b border-border">
+                  <div className="flex items-center gap-2">
+                    <Check className="w-3.5 h-3.5 text-muted-foreground" />
+                    <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Recent Results</span>
+                  </div>
+                </div>
+                <div className="px-3 py-2 space-y-1.5">
+                  {phase.recentMatches.map(match => (
+                    <LeaguePhaseMatchRow key={match.id} match={match} />
+                  ))}
+                </div>
+              </Card>
+            )}
+          </div>
+          <div>
+            <FavoritesPanel favorites={cup.favorites} theme={theme} shortName={cup.shortName} />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -712,6 +944,11 @@ function CompetitionDetail({ cup }: { cup: EuropeanCupData }) {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Left: Rounds list */}
           <div className="lg:col-span-2">
+            {cup.rounds.length === 0 && (
+              <div className="border border-dashed border-border/40 rounded-lg px-4 py-8 text-center mb-6">
+                <p className="text-xs text-muted-foreground/60">Knockout bracket has not started yet</p>
+              </div>
+            )}
             {cup.rounds.map((round) => (
               <RoundSection key={round.name} round={round} theme={theme} />
             ))}
@@ -739,7 +976,7 @@ function DomesticCupDetail({ cup }: { cup: DomesticCupData }) {
         <img src={cup.logo} alt={cup.name} className="w-10 h-10 object-contain" loading="lazy" crossOrigin="anonymous" />
         <div>
           <h2 className="text-lg font-bold text-foreground">{cup.name}</h2>
-          <p className="text-xs text-muted-foreground">{cup.currentRound} {cup.countryFlag}</p>
+          <p className="text-xs text-muted-foreground">{seasonSubtitle(cup.seasonLabel, cup.currentRound)} {cup.countryFlag}</p>
         </div>
       </div>
 
@@ -964,7 +1201,7 @@ function DomesticCupCard({ cup }: { cup: DomesticCupData }) {
           <img src={cup.logo} alt={cup.name} className="w-6 h-6 object-contain" loading="lazy" crossOrigin="anonymous" />
           <div>
             <h2 className="font-semibold text-sm text-foreground">{cup.name}</h2>
-            <p className="text-xs text-muted-foreground">{cup.currentRound} {cup.countryFlag}</p>
+            <p className="text-xs text-muted-foreground">{seasonSubtitle(cup.seasonLabel, cup.currentRound)} {cup.countryFlag}</p>
           </div>
         </div>
         <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-foreground transition-colors" />
@@ -1201,7 +1438,7 @@ export default function EuropeanCups() {
               )}
               <div>
                 <h2 className="text-lg font-bold text-foreground">{activeCup.name}</h2>
-                <p className="text-xs text-muted-foreground">{activeCup.currentRound}</p>
+                <p className="text-xs text-muted-foreground">{seasonSubtitle(activeCup.seasonLabel, activeCup.currentRound)}</p>
               </div>
             </div>
             <CompetitionDetail cup={activeCup} />
