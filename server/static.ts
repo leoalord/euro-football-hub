@@ -21,7 +21,8 @@ export function serveStatic(app: Express) {
     indexHtml = indexHtml.replace("</head>", `    ${umamiScript}\n  </head>`);
   }
 
-  app.use(express.static(distPath));
+  // index: false so "/" falls through to the injected index.html below
+  app.use(express.static(distPath, { index: false }));
 
   // fall through to index.html if the file doesn't exist
   app.use("/{*path}", (_req, res) => {

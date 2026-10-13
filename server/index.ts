@@ -54,6 +54,9 @@ app.use((req, res, next) => {
       }
 
       log(logLine);
+    } else if (req.method === "GET" && req.accepts("html") && !path.includes(".")) {
+      // Page loads (not assets), so bot vs human traffic is visible in Railway logs
+      log(`page ${path} ${res.statusCode} ua="${req.get("user-agent") ?? "-"}"`, "visit");
     }
   });
 
