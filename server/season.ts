@@ -39,49 +39,55 @@ export function isInSeason(date: Date, season: FootballSeason = getFootballSeaso
   return date.getTime() >= season.start.getTime() && date.getTime() <= season.end.getTime();
 }
 
-/** Monthly ESPN scoreboard ranges covering [from, to], inclusive. */
-export function monthlyDateRanges(from: Date, to: Date): string[] {
-  const ranges: string[] = [];
+/**
+ * ESPN scoreboard `dates` values (YYYYMM) for every month touching [from, to].
+ * ESPN rejects YYYYMMDD-YYYYMMDD ranges with a 400 but accepts whole months,
+ * so callers fetch by month and filter events to their exact window.
+ */
+export function scoreboardMonths(from: Date, to: Date): string[] {
+  const months: string[] = [];
+  if (from > to) return months;
   let cursor = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), 1));
-  const endMonth = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), 1));
-
-  while (cursor <= endMonth) {
-    const monthStart = cursor < from ? from : cursor;
-    const nextMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
-    const monthEnd = addUtcDays(nextMonth, -1);
-    const rangeEnd = monthEnd < to ? monthEnd : to;
-    if (monthStart <= rangeEnd) {
-      ranges.push(`${yyyymmdd(monthStart)}-${yyyymmdd(rangeEnd)}`);
-    }
-    cursor = nextMonth;
+  while (cursor <= to) {
+    months.push(cursor.toISOString().slice(0, 7).replace("-", ""));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
   }
-  return ranges;
+  return months;
+}
+
+/** True if an ESPN event's date falls within [from, to]. */
+export function isEventInWindow(event: { date?: string }, from: Date, to: Date): boolean {
+  if (!event?.date) return false;
+  const t = new Date(event.date).getTime();
+  return t >= from.getTime() && t <= to.getTime();
 }
 
 /**
- * Scoreboard windows for the current season: from season start through the
+ * Scoreboard months for the current season: from season start through the
  * earlier of season end or `lookaheadDays` from now. Never includes last
  * season's spring knockouts once the new season has begun.
  */
-export function currentSeasonScoreboardRanges(
+export function currentSeasonScoreboardMonths(
   now: Date = new Date(),
   lookaheadDays = 180,
 ): string[] {
   const season = getFootballSeason(now);
   const horizon = addUtcDays(now, lookaheadDays);
   const to = horizon < season.end ? horizon : season.end;
-  const from = season.start;
-  if (from > to) return [];
-  return monthlyDateRanges(from, to);
+  if (season.start > to) return [];
+  return scoreboardMonths(season.start, to);
 }
 
 /** Domestic cups: recent results plus the rest of the current season. */
-export function domesticCupScoreboardRange(now: Date = new Date(), lookbackDays = 45): string {
+export function domesticCupScoreboardWindow(
+  now: Date = new Date(),
+  lookbackDays = 45,
+): { from: Date; to: Date; months: string[] } {
   const season = getFootballSeason(now);
   const lookback = addUtcDays(now, -lookbackDays);
   const from = lookback > season.start ? lookback : season.start;
   const to = season.end;
-  return `${yyyymmdd(from)}-${yyyymmdd(to)}`;
+  return { from, to, months: scoreboardMonths(from, to) };
 }
 
 export const KNOCKOUT_ROUND_ORDER = [

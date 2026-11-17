@@ -69,3 +69,38 @@ export async function fetchKalshiMarkets(
     return [];
   });
 }
+
+/**
+ * Implied probability (0-100) for a Kalshi market.
+ *
+ * `last_price` is the last trade, which on thin markets can be days old and sit
+ * outside the current quotes (e.g. last 26% while the book is 13-23%), or be 0
+ * while traders are quoting 2-11%. Trust the last trade only when it lies within
+ * the live bid/ask; otherwise use the midpoint. Fall back to the last trade only
+ * when there are no quotes at all.
+ */
+export function marketProbability(m: any): number {
+  const num = (v: unknown) => {
+    const n = parseFloat(String(v ?? ""));
+    return Number.isFinite(n) ? n : 0;
+  };
+  const last = num(m?.last_price_dollars);
+  const bid = num(m?.yes_bid_dollars);
+  const ask = num(m?.yes_ask_dollars);
+
+  let price = last;
+  if (ask > 0 && ask >= bid && !(last >= bid && last <= ask)) {
+    price = (bid + ask) / 2;
+  }
+  // Epsilon avoids float artifacts like 0.065 * 100 = 6.4999...
+  return Math.round(price * 100 + 1e-9);
+}
+
+/** Lowercase and strip accents/odd apostrophes so "Málaga" matches "Malaga". */
+export function normalizeTeamName(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ´]/g, "")
+    .toLowerCase()
+    .trim();
+}

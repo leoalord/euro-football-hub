@@ -1,6 +1,7 @@
 import { LEAGUES, COMPETITIONS, LEAGUE_CUPS, EURO_COMPS, type LeagueSlug, type StandingEntry, type Match, type Article, type LeagueData, type BattleGroup, type MatchOdds } from "@shared/schema";
 import { fetchLeagueOdds, getTitleOddsForTeam, getRelegationOddsForTeam, type LeagueOdds } from "./kalshi";
 import { cached, getCacheTTL } from "./cache";
+import { isEventInWindow, scoreboardMonths } from "./season";
 
 const ESPN_BASE = "https://site.api.espn.com/apis";
 
@@ -8,10 +9,6 @@ function addDays(base: Date, days: number): Date {
   const d = new Date(base.getTime());
   d.setUTCDate(d.getUTCDate() + days);
   return d;
-}
-
-function yyyymmdd(d: Date): string {
-  return d.toISOString().slice(0, 10).replace(/-/g, "");
 }
 
 async function fetchJSON(url: string): Promise<any> {
@@ -214,28 +211,21 @@ async function fetchMatchesForDateRange(slug: LeagueSlug, start: Date, end: Date
   const rankMap = new Map<string, number>();
   standings.forEach(s => rankMap.set(s.teamId, s.rank));
 
-  const chunks: Array<[Date, Date]> = [];
-  let cursor = new Date(start.getTime());
-  while (cursor < end) {
-    const chunkEnd = addDays(cursor, 14);
-    chunks.push([new Date(cursor.getTime()), chunkEnd < end ? chunkEnd : new Date(end.getTime())]);
-    cursor = addDays(chunkEnd, 1);
-  }
-
   const results = await Promise.allSettled(
-    chunks.map(([from, to]) => {
-      const range = `${yyyymmdd(from)}-${yyyymmdd(to)}`;
-      return fetchJSON(
-        `${ESPN_BASE}/site/v2/sports/soccer/${slug}/scoreboard?dates=${range}&limit=300`,
-      );
-    }),
+    scoreboardMonths(start, end).map(month =>
+      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${slug}/scoreboard?dates=${month}&limit=300`),
+    ),
   );
 
   const seen = new Set<string>();
   const matches: Match[] = [];
   for (const result of results) {
-    if (result.status !== "fulfilled") continue;
-    for (const match of parseScoreboardEvents(result.value?.events || [], rankMap)) {
+    if (result.status !== "fulfilled") {
+      console.error(`[ESPN] Error fetching ${slug} matches:`, result.reason);
+      continue;
+    }
+    const events = (result.value?.events || []).filter((e: any) => isEventInWindow(e, start, end));
+    for (const match of parseScoreboardEvents(events, rankMap)) {
       if (!match.id || seen.has(match.id)) continue;
       seen.add(match.id);
       matches.push(match);
@@ -308,6 +298,14 @@ function getFallbackTitleOdds(teamName: string, slug: LeagueSlug): number | null
   return null;
 }
 
+const TITLE_ODDS_THRESHOLD = 5;
+
+// Points a chaser can trail by and still count as a title contender: a quarter
+// of the games left (5pts back with 20 to play; 2pts back with 8 to play).
+export function titleGapAllowance(gamesRemaining: number): number {
+  return Math.ceil(Math.max(0, gamesRemaining) / 4);
+}
+
 // Smart battle grouping
 export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kalshiOdds?: LeagueOdds): BattleGroup[] {
   if (standings.length === 0) return [];
@@ -327,16 +325,18 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
     const gap = leader.points - team.points;
     const remaining = team.gamesRemaining || (totalGames - team.gamesPlayed);
     const canCatch = (team.maxPossiblePoints || 0) >= leader.points;
-    const plausible = gap <= Math.ceil(remaining * 1.5);
-    const realistic = !(gap > 15 && remaining <= 10);
     // Use Kalshi odds if available, fall back to hardcoded
     const odds = kalshiOdds
       ? getTitleOddsForTeam(team.teamName, kalshiOdds)
       : getFallbackTitleOdds(team.teamName, slug);
-    // Title contenders need >=5% implied odds to qualify
-    // If no odds data exists and gap is large (>10), also skip (avoids false positives)
-    const hasRealisticOdds = odds !== null ? odds >= 5 : gap <= 10;
-    if (canCatch && plausible && realistic && hasRealisticOdds && team.rank <= 8) {
+    // A team is in the race if the market rates it (>=5%) OR it's within
+    // striking distance on points. Long-shot title markets sit at Kalshi's 1c
+    // floor because nobody trades them, so low odds alone can't rule a team out
+    // (e.g. Freiburg 2pts off Bayern after 9 games was priced at 1%).
+    if (canCatch && team.rank <= 8 && (
+      (odds !== null && odds >= TITLE_ODDS_THRESHOLD) ||
+      gap <= titleGapAllowance(remaining)
+    )) {
       titleContenderIds.add(team.teamId);
     }
   }
@@ -409,9 +409,13 @@ export function computeBattles(standings: StandingEntry[], slug: LeagueSlug, kal
   if (titleTeams.length === 1) {
     insight = `${leader.teamName} have the title all but wrapped up.`;
   } else if (titleTeams.length === 2) {
-    insight = `Title race: ${titleTeams[0].teamName} lead ${titleTeams[1].teamName} by ${titleGap}pt${titleGap !== 1 ? "s" : ""}.`;
+    insight = titleGap === 0
+      ? `Title race: ${titleTeams[0].teamName} and ${titleTeams[1].teamName} are level on points.`
+      : `Title race: ${titleTeams[0].teamName} lead ${titleTeams[1].teamName} by ${titleGap}pt${titleGap !== 1 ? "s" : ""}.`;
   } else if (titleTeams.length > 2) {
-    insight = `${titleTeams.length}-way title fight, ${leader.teamName} lead by ${titleGap}pt${titleGap !== 1 ? "s" : ""}.`;
+    insight = titleGap === 0
+      ? `${titleTeams.length}-way title fight, ${titleTeams[0].teamName} and ${titleTeams[1].teamName} level at the top.`
+      : `${titleTeams.length}-way title fight, ${leader.teamName} lead by ${titleGap}pt${titleGap !== 1 ? "s" : ""}.`;
   }
   // Euro cutoff part
   if (euroCutoffGap <= 3) {
@@ -574,14 +578,12 @@ const ALL_COMP_SLUGS = Array.from(new Set([
 
 async function fetchCompetitionEvents(compSlug: string): Promise<any[]> {
   const now = new Date();
-  const ranges = [
-    `${yyyymmdd(now)}-${yyyymmdd(addDays(now, 30))}`,
-    `${yyyymmdd(addDays(now, 31))}-${yyyymmdd(addDays(now, 90))}`,
-  ];
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const end = addDays(start, 91);
 
   const results = await Promise.allSettled(
-    ranges.map(range =>
-      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${compSlug}/scoreboard?dates=${range}&limit=200`)
+    scoreboardMonths(start, end).map(month =>
+      fetchJSON(`${ESPN_BASE}/site/v2/sports/soccer/${compSlug}/scoreboard?dates=${month}&limit=200`)
     )
   );
 
@@ -590,7 +592,7 @@ async function fetchCompetitionEvents(compSlug: string): Promise<any[]> {
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
     for (const event of result.value?.events || []) {
-      if (!event?.id || seen.has(event.id)) continue;
+      if (!event?.id || seen.has(event.id) || !isEventInWindow(event, start, end)) continue;
       seen.add(event.id);
       events.push(event);
     }

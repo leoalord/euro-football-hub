@@ -1,7 +1,9 @@
 import {
   getFootballSeason,
-  currentSeasonScoreboardRanges,
-  domesticCupScoreboardRange,
+  currentSeasonScoreboardMonths,
+  domesticCupScoreboardWindow,
+  scoreboardMonths,
+  isEventInWindow,
   isInSeason,
   normalizeRoundName,
   inferEuropeanRoundFromDate,
@@ -33,16 +35,31 @@ assert(isInSeason(sept2026, season), "Sept 2026 is in 2026-27");
 assert(!isInSeason(apr2026, season), "April 2026 QF is NOT in 2026-27");
 assert(isInSeason(jan2027, season), "Jan 2027 league phase is in 2026-27");
 
-const ranges = currentSeasonScoreboardRanges(sept2026);
-assert(ranges.length > 0, "expected season ranges");
-assert(ranges.every(r => !r.includes("202604")), `must not fetch last season QF window, got ${ranges.join(",")}`);
-assert(ranges.some(r => r.startsWith("202609") || r.includes("202609")), `must include Sept 2026, got ${ranges.join(",")}`);
-assert(ranges[0].startsWith("202607"), `season fetch starts in July, got ${ranges[0]}`);
+// ESPN rejects YYYYMMDD-YYYYMMDD ranges (400); only YYYYMM months are sent.
+const months = currentSeasonScoreboardMonths(sept2026);
+assert(months.every(m => /^\d{6}$/.test(m)), `months must be YYYYMM, got ${months.join(",")}`);
+assert(!months.includes("202604"), `must not fetch last season QF window, got ${months.join(",")}`);
+assert(months.includes("202609"), `must include Sept 2026, got ${months.join(",")}`);
+assert(months[0] === "202607", `season fetch starts in July, got ${months[0]}`);
+assert(months[months.length - 1] === "202703", `180-day lookahead ends in March, got ${months.join(",")}`);
 
-const domestic = domesticCupScoreboardRange(sept2026);
-assert(!domestic.endsWith("20260701"), `domestic end must not be last season July 1, got ${domestic}`);
-assert(domestic.endsWith("20270630"), `domestic should run through season end, got ${domestic}`);
-assert(domestic.startsWith("2026"), `domestic start should be current season, got ${domestic}`);
+assert(
+  scoreboardMonths(new Date("2026-11-20T00:00:00Z"), new Date("2027-01-05T00:00:00Z")).join(",") === "202611,202612,202701",
+  "months span year boundary",
+);
+assert(scoreboardMonths(new Date("2026-10-31T00:00:00Z"), new Date("2026-10-01T00:00:00Z")).length === 0, "empty when from > to");
+
+const domestic = domesticCupScoreboardWindow(sept2026);
+assert(domestic.months[0] === "202607", `domestic starts at season start (45d lookback is pre-season), got ${domestic.months[0]}`);
+assert(domestic.months[domestic.months.length - 1] === "202706", `domestic runs through season end, got ${domestic.months.join(",")}`);
+assert(!domestic.months.includes("202604"), "domestic must not fetch last season");
+const octWindow = domesticCupScoreboardWindow(new Date("2026-10-13T12:00:00Z"));
+assert(octWindow.from.toISOString().startsWith("2026-08-29"), `45-day lookback, got ${octWindow.from.toISOString()}`);
+assert(octWindow.months[0] === "202608", `lookback month included, got ${octWindow.months[0]}`);
+
+assert(isEventInWindow({ date: "2026-09-01T19:00Z" }, octWindow.from, octWindow.to), "event inside window");
+assert(!isEventInWindow({ date: "2026-08-15T19:00Z" }, octWindow.from, octWindow.to), "event before lookback excluded");
+assert(!isEventInWindow({}, octWindow.from, octWindow.to), "event without date excluded");
 
 assert(normalizeRoundName(collectRoundHints({ season: { slug: "league-phase", type: { name: "League Phase" } } })) === "League Phase", "ESPN league-phase slug");
 assert(normalizeRoundName(collectRoundHints({ season: { slug: "first-round" } })) === "First Round", "ESPN first-round slug");

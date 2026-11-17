@@ -1,10 +1,10 @@
 import { EURO_CUP_CONFIG, type EuropeanCupData, type CupTeam, type CupMatch, type CupTie, type CupRound, type CupFavorite, type CupGroupTable, type CupLeaguePhase, type CupStandingRow, type MatchOdds } from "@shared/schema";
-import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
+import { fetchKalshiMarkets as fetchKalshiMarketsRaw, marketProbability, normalizeTeamName } from "./kalshi-client";
 import { cached, getCacheTTL } from "./cache";
 import { fetchEspnJSON } from "./espn-json";
 import {
   collectRoundHints,
-  currentSeasonScoreboardRanges,
+  currentSeasonScoreboardMonths,
   getFootballSeason,
   isInSeason,
   isKnockoutRound,
@@ -51,7 +51,7 @@ async function fetchTournamentOdds(kalshiTicker: string): Promise<KalshiTourname
       const odds: KalshiTournamentOdds[] = markets
         .map((m: any) => ({
           teamName: m.no_sub_title || m.yes_sub_title || "",
-          probability: Math.round(parseFloat(m.last_price_dollars || "0") * 100),
+          probability: marketProbability(m),
           ticker: m.ticker || "",
           isEliminated: m.status === "finalized" || m.status === "settled",
         }))
@@ -78,7 +78,7 @@ async function fetchAdvanceOdds(seriesTicker: string | undefined): Promise<Kalsh
     for (const m of markets) {
       const title = m.title || "";
       const teamName = m.no_sub_title || m.yes_sub_title || "";
-      const prob = Math.round(parseFloat(m.last_price_dollars || "0") * 100);
+      const prob = marketProbability(m);
       const settled = m.status === "finalized" || m.status === "settled";
       if (!tieMap.has(title)) tieMap.set(title, []);
       tieMap.get(title)!.push({ team: teamName, prob, settled });
@@ -165,32 +165,53 @@ const CUP_TEAM_NAME_MAP: Record<string, string> = {
   "Strasbourg Alsace": "Strasbourg",
   "Samsunpor": "Samsunspor",
   "Olomouc": "Sigma Olomouc",
+  // Found by auditing every Kalshi name against ESPN's spelling (Nov 2026)
+  "Bodoe/Glimt": "Bodo/Glimt",
+  "Sabah Masazir": "Sabah FK",
+  "Union Gilloise": "Union St.-Gilloise",
+  "Be`er Sheva": "Hapoel Be'er",
+  "Lillestroem": "Lillestrom",
+  "Enschede": "FC Twente",
+  "Copenhagen": "F.C. København",
+  "Uni Craiova": "CSU Craiova",
+  "St. Truidense": "Sint-Truidense",
+  "Crvena Zvezda": "Red Star Belgrade",
+  "Aarhus": "AGF",
+  "Nordsjaelland": "FC Nordsjælland",
+  "Kuopion Palloseura": "KuPS Kuopio",
+  "IC Escaldes": "Inter D'Escaldes",
 };
 
-function matchCupTeam(kalshiName: string, espnName: string): boolean {
-  const kLower = kalshiName.toLowerCase();
-  const eLower = espnName.toLowerCase();
+export function matchCupTeam(kalshiName: string, espnName: string): boolean {
+  const kLower = normalizeTeamName(kalshiName);
+  const eLower = normalizeTeamName(espnName);
   if (eLower.includes(kLower) || kLower.includes(eLower)) return true;
   const mapped = CUP_TEAM_NAME_MAP[kalshiName];
   if (mapped) {
-    const mLower = mapped.toLowerCase();
+    const mLower = normalizeTeamName(mapped);
     return eLower.includes(mLower) || mLower.includes(eLower);
   }
   return false;
 }
 
+function isExactCupTeam(kalshiName: string, espnName: string): boolean {
+  const e = normalizeTeamName(espnName);
+  const mapped = CUP_TEAM_NAME_MAP[kalshiName];
+  return normalizeTeamName(kalshiName) === e || (!!mapped && normalizeTeamName(mapped) === e);
+}
+
+// Exact/mapped name before substring, so "Lille" can't claim "Lillestrom".
+export function findCupOdds(teamName: string, odds: KalshiTournamentOdds[]): KalshiTournamentOdds | undefined {
+  return odds.find(o => isExactCupTeam(o.teamName, teamName))
+    ?? odds.find(o => matchCupTeam(o.teamName, teamName));
+}
+
 function getTeamOdds(teamName: string, odds: KalshiTournamentOdds[]): number | null {
-  for (const o of odds) {
-    if (matchCupTeam(o.teamName, teamName)) return o.probability;
-  }
-  return null;
+  return findCupOdds(teamName, odds)?.probability ?? null;
 }
 
 function isTeamEliminated(teamName: string, odds: KalshiTournamentOdds[]): boolean {
-  for (const o of odds) {
-    if (matchCupTeam(o.teamName, teamName)) return o.isEliminated;
-  }
-  return false;
+  return findCupOdds(teamName, odds)?.isEliminated ?? false;
 }
 
 // ---- Parse American odds ----
@@ -285,16 +306,19 @@ async function fetchCupEvents(espnSlug: string, now = new Date()): Promise<any[]
   const allEvents: any[] = [];
   const seenIds = new Set<string>();
   const season = getFootballSeason(now);
-  const dateRanges = currentSeasonScoreboardRanges(now);
+  const months = currentSeasonScoreboardMonths(now);
 
   const results = await Promise.allSettled(
-    dateRanges.map(range =>
-      fetchJSON(`/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}&limit=300`)
+    months.map(month =>
+      fetchJSON(`/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${month}&limit=300`)
     )
   );
 
   for (const result of results) {
-    if (result.status !== "fulfilled") continue;
+    if (result.status !== "fulfilled") {
+      console.error(`[EuroCup] Error fetching ${espnSlug}:`, result.reason);
+      continue;
+    }
     for (const event of result.value?.events || []) {
       if (!event?.id || seenIds.has(event.id)) continue;
       if (event.date && !isInSeason(new Date(event.date), season)) continue;

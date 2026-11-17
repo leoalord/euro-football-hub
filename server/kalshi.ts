@@ -1,5 +1,5 @@
 import type { LeagueSlug } from "@shared/schema";
-import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
+import { fetchKalshiMarkets as fetchKalshiMarketsRaw, marketProbability, normalizeTeamName } from "./kalshi-client";
 import { cached } from "./cache";
 
 // Kalshi series tickers mapped to our league slugs
@@ -69,12 +69,13 @@ const TEAM_NAME_MAP: Record<string, string> = {
   "Oviedo": "Real Oviedo",
   "Levante": "Levante",
   "Alaves": "Deportivo Alavés",
+  "Athletic Bilbao": "Athletic Club",
   "Elche": "Elche",
   // Ligue 1
   "PSG": "Paris Saint-Germain",
   "Paris": "Paris FC",
   "Stade Brest 29": "Brest",
-  "Stade Rennes": "Rennes",
+  "Stade Rennes": "Stade Rennais",
   "Strasbourg Alsace": "Strasbourg",
   "Metz": "FC Metz",
   "Auxerre": "AJ Auxerre",
@@ -106,11 +107,10 @@ async function fetchKalshiMarkets(seriesTicker: string): Promise<any[]> {
 function parseMarkets(markets: any[]): KalshiOdds[] {
   return markets
     .map((m: any) => {
-      const price = parseFloat(m.last_price_dollars || "0");
       const teamName = m.no_sub_title || m.yes_sub_title || "";
       return {
         teamName,
-        probability: Math.round(price * 100),
+        probability: marketProbability(m),
         ticker: m.ticker || "",
       };
     })
@@ -144,22 +144,29 @@ export async function fetchLeagueOdds(slug: LeagueSlug): Promise<LeagueOdds> {
   });
 }
 
-// Match a Kalshi team name to an ESPN team name using fuzzy matching
-export function matchKalshiTeam(kalshiName: string, espnName: string): boolean {
-  const kLower = kalshiName.toLowerCase();
-  const eLower = espnName.toLowerCase();
-
-  // Direct fuzzy match first (handles exact and substring matches)
-  if (eLower.includes(kLower) || kLower.includes(eLower)) return true;
-
-  // Check explicit mapping
+// Match a Kalshi team name to an ESPN team name. Accent-insensitive, and
+// exact matches win over substring matches so e.g. Kalshi "Paris" (Paris FC)
+// can't be picked up for "Paris Saint-Germain".
+function kalshiCandidates(kalshiName: string): string[] {
+  const names = [normalizeTeamName(kalshiName)];
   const mapped = TEAM_NAME_MAP[kalshiName];
-  if (mapped) {
-    const mLower = mapped.toLowerCase();
-    return eLower.includes(mLower) || mLower.includes(eLower);
-  }
+  if (mapped) names.push(normalizeTeamName(mapped));
+  return names;
+}
 
-  return false;
+function isExactMatch(kalshiName: string, espnName: string): boolean {
+  const e = normalizeTeamName(espnName);
+  return kalshiCandidates(kalshiName).some(k => k === e);
+}
+
+export function matchKalshiTeam(kalshiName: string, espnName: string): boolean {
+  const e = normalizeTeamName(espnName);
+  return kalshiCandidates(kalshiName).some(k => k && (e.includes(k) || k.includes(e)));
+}
+
+export function findKalshiEntry(teamName: string, entries: KalshiOdds[]): KalshiOdds | undefined {
+  return entries.find(o => isExactMatch(o.teamName, teamName))
+    ?? entries.find(o => matchKalshiTeam(o.teamName, teamName));
 }
 
 // Get title odds for a specific team (returns probability 0-100 or null)
@@ -167,12 +174,7 @@ export function getTitleOddsForTeam(
   teamName: string,
   odds: LeagueOdds
 ): number | null {
-  for (const entry of odds.title) {
-    if (matchKalshiTeam(entry.teamName, teamName)) {
-      return entry.probability;
-    }
-  }
-  return null;
+  return findKalshiEntry(teamName, odds.title)?.probability ?? null;
 }
 
 // Get relegation odds for a specific team (returns probability 0-100 or null)
@@ -180,12 +182,7 @@ export function getRelegationOddsForTeam(
   teamName: string,
   odds: LeagueOdds
 ): number | null {
-  for (const entry of odds.relegation) {
-    if (matchKalshiTeam(entry.teamName, teamName)) {
-      return entry.probability;
-    }
-  }
-  return null;
+  return findKalshiEntry(teamName, odds.relegation)?.probability ?? null;
 }
 
 // Fetch odds for all leagues in parallel
