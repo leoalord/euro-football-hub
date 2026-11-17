@@ -365,9 +365,9 @@ export const EURO_CUP_CONFIG: Record<string, { name: string; shortName: string; 
 // Domestic cup config
 export const DOMESTIC_CUP_CONFIG: Record<string, { name: string; shortName: string; espnSlug: string; country: string; countryFlag: string; leagueSlug: string; logo: string; kalshiTicker?: string }> = {
   "eng.fa": { name: "FA Cup", shortName: "FA", espnSlug: "eng.fa", country: "England", countryFlag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", leagueSlug: "eng.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/40.png", kalshiTicker: "KXFACUP" },
-  "eng.league_cup": { name: "Carabao Cup", shortName: "CC", espnSlug: "eng.league_cup", country: "England", countryFlag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", leagueSlug: "eng.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/41.png" },
+  "eng.league_cup": { name: "Carabao Cup", shortName: "CC", espnSlug: "eng.league_cup", country: "England", countryFlag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", leagueSlug: "eng.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/41.png", kalshiTicker: "KXEFLCUP" },
   "ger.dfb_pokal": { name: "DFB-Pokal", shortName: "DFB", espnSlug: "ger.dfb_pokal", country: "Germany", countryFlag: "🇩🇪", leagueSlug: "ger.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/2061.png", kalshiTicker: "KXDFBPOKAL" },
   "ita.coppa_italia": { name: "Coppa Italia", shortName: "CI", espnSlug: "ita.coppa_italia", country: "Italy", countryFlag: "🇮🇹", leagueSlug: "ita.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/2192.png", kalshiTicker: "KXCOPPAITALIA" },
   "esp.copa_del_rey": { name: "Copa del Rey", shortName: "CdR", espnSlug: "esp.copa_del_rey", country: "Spain", countryFlag: "🇪🇸", leagueSlug: "esp.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/80.png", kalshiTicker: "KXCOPADELREY" },
-  "fra.coupe_de_france": { name: "Coupe de France", shortName: "CdF", espnSlug: "fra.coupe_de_france", country: "France", countryFlag: "🇫🇷", leagueSlug: "fra.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/182.png" },
+  "fra.coupe_de_france": { name: "Coupe de France", shortName: "CdF", espnSlug: "fra.coupe_de_france", country: "France", countryFlag: "🇫🇷", leagueSlug: "fra.1", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/182.png", kalshiTicker: "KXCOUPEDEFRANCE" },
 };

@@ -3,29 +3,36 @@ import { cached, getCacheTTL } from "./cache";
 import { fetchEspnJSON } from "./espn-json";
 import {
   collectRoundHints,
-  domesticCupScoreboardRange,
+  domesticCupScoreboardWindow,
   getFootballSeason,
-  isInSeason,
+  isEventInWindow,
   normalizeRoundName,
   resolveDomesticRound,
 } from "./season";
 
 // Fetch current-season events (never last spring's leftover QF/finals).
 async function fetchCupEvents(espnSlug: string, now = new Date()): Promise<any[]> {
-  try {
-    const season = getFootballSeason(now);
-    const range = domesticCupScoreboardRange(now);
-    const data = await fetchEspnJSON(
-      `/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${range}&limit=200`,
-    );
-    return (data.events || []).filter((event: any) => {
-      if (!event?.date) return false;
-      return isInSeason(new Date(event.date), season);
-    });
-  } catch (error) {
-    console.error(`[DomesticCup] Error fetching ${espnSlug}:`, error);
-    return [];
+  const { from, to, months } = domesticCupScoreboardWindow(now);
+  const results = await Promise.allSettled(
+    months.map(month =>
+      fetchEspnJSON(`/site/v2/sports/soccer/${espnSlug}/scoreboard?dates=${month}&limit=200`),
+    ),
+  );
+
+  const events: any[] = [];
+  const seen = new Set<string>();
+  for (const result of results) {
+    if (result.status !== "fulfilled") {
+      console.error(`[DomesticCup] Error fetching ${espnSlug}:`, result.reason);
+      continue;
+    }
+    for (const event of result.value?.events || []) {
+      if (!event?.id || seen.has(event.id) || !isEventInWindow(event, from, to)) continue;
+      seen.add(event.id);
+      events.push(event);
+    }
   }
+  return events;
 }
 
 // Parse ESPN event into a DomesticCupMatch
@@ -87,7 +94,42 @@ function parseEvent(event: any): DomesticCupMatch | null {
 }
 
 // ---- Kalshi Tournament Winner Odds ----
-import { fetchKalshiMarkets as fetchKalshiMarketsRaw } from "./kalshi-client";
+import { fetchKalshiMarkets as fetchKalshiMarketsRaw, marketProbability, normalizeTeamName } from "./kalshi-client";
+
+// Match an ESPN cup team to its Kalshi winner market. Exact before substring,
+// and a first-word match only when that word is unique among the markets —
+// otherwise "Manchester United" would pick up Manchester City's odds.
+// ESPN uses abbreviated names in cup fixtures ("Man City", "C Palace") that
+// share no substring with Kalshi's full names. Keys/values are normalized.
+const ESPN_CUP_ALIASES: Record<string, string> = {
+  "man city": "manchester city",
+  "man utd": "manchester united",
+  "man united": "manchester united",
+  "c palace": "crystal palace",
+  "nottm forest": "nottingham forest",
+  "sheffield wed": "sheffield wednesday",
+  "sheffield utd": "sheffield united",
+  "wolves": "wolverhampton",
+  "spurs": "tottenham",
+  "qpr": "queens park rangers",
+  "inter milan": "inter",
+  "d dresden": "dynamo dresden",
+  "st. etienne": "saint-etienne",
+};
+
+export function findCupFavorite<T extends { teamName: string }>(teamName: string, favorites?: T[]): T | undefined {
+  if (!favorites || favorites.length === 0) return undefined;
+  const raw = normalizeTeamName(teamName);
+  const mn = ESPN_CUP_ALIASES[raw] ?? raw;
+  const named = favorites.map(f => ({ f, fn: normalizeTeamName(f.teamName) }));
+  const exact = named.find(({ fn }) => fn === mn);
+  if (exact) return exact.f;
+  const sub = named.find(({ fn }) => fn.includes(mn) || mn.includes(fn));
+  if (sub) return sub.f;
+  const first = mn.split(" ")[0];
+  const byFirst = named.filter(({ fn }) => fn.split(" ")[0] === first);
+  return byFirst.length === 1 ? byFirst[0].f : undefined;
+}
 
 const KALSHI_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
@@ -109,7 +151,7 @@ async function fetchDomesticCupOdds(kalshiTicker: string, allMatches: DomesticCu
     const favorites: DomesticCupFavorite[] = markets
       .map((m: any) => {
         const teamName = m.no_sub_title || m.yes_sub_title || "";
-        const probability = Math.round(parseFloat(m.last_price_dollars || "0") * 100);
+        const probability = marketProbability(m);
         const isEliminated = m.status === "finalized" || m.status === "settled";
 
         // Try to find the team logo from ESPN data
@@ -173,8 +215,11 @@ export async function fetchDomesticCupData(slug: string): Promise<DomesticCupDat
     }
   }
 
+  // Scheduled fixtures define the current round; recent results only when none are named
+  // (otherwise 16 completed Third Round ties outvote 8 posted Fourth Round fixtures).
+  const upcomingRounds = upcoming.map(m => m.round).filter(Boolean);
   const currentRound = resolveDomesticRound(
-    [...upcoming, ...recentResults].map(m => m.round),
+    upcomingRounds.length > 0 ? upcomingRounds : recentResults.map(m => m.round),
     upcoming.length,
     recentResults.length,
   );
@@ -194,19 +239,7 @@ export async function fetchDomesticCupData(slug: string): Promise<DomesticCupDat
   const MAX_MATCH_ODDS = 92; // cap: no pre-match implied odds above this
   const MIN_MATCH_ODDS = 8;  // floor: no pre-match implied odds below this
 
-  // Normalize team names: strip accents, lowercase, trim
-  const normalize = (s: string) =>
-    s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-
-  const findFavorite = (teamName: string) => {
-    if (!favorites || favorites.length === 0) return undefined;
-    const mn = normalize(teamName);
-    return favorites.find(f => {
-      const fn = normalize(f.teamName);
-      return fn === mn || fn.includes(mn) || mn.includes(fn) ||
-        fn.split(" ")[0] === mn.split(" ")[0];
-    });
-  };
+  const findFavorite = (teamName: string) => findCupFavorite(teamName, favorites);
 
   const enrichedUpcoming = upcoming.slice(0, 8).map(match => {
     if (!favorites || favorites.length === 0) return match;
