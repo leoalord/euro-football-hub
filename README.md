@@ -52,12 +52,14 @@ The Express server already reads `PORT` and binds `0.0.0.0`. Railway should buil
 2. Command Palette (`⌘K` / `Ctrl+K`) → **Deploy Latest Commit**
 3. To restore push-to-`main` autodeploys: service **Settings → Source** → disconnect GitHub, reconnect `leoalord/euro-football-hub` on `main`, and enable Auto Deploy
 
-**Or deploy from GitHub Actions**
+**Or deploy from GitHub Actions (manual fallback)**
+
+Pushes to `main` deploy through Railway's GitHub integration. If those autodeploys stop, use this workflow instead:
 
 1. In Railway: Project Settings → Tokens → create a **project token**
 2. In GitHub: repo **Settings → Secrets and variables → Actions** → add `RAILWAY_TOKEN`
 3. If the service is not named `euro-football-hub`, add a repo Actions variable `RAILWAY_SERVICE` with the real name
-4. Push to `main` or run **Deploy to Railway** from the Actions tab
+4. Run **Deploy to Railway** from the Actions tab
 
 ### Render
 
