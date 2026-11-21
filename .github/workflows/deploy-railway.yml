@@ -1,8 +1,8 @@
 name: Deploy to Railway
 
+# Manual fallback only: Railway's GitHub integration deploys every push to main.
+# Run this from the Actions tab if those autodeploys stop working.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -11,9 +11,17 @@ concurrency:
 
 jobs:
   deploy:
-    if: ${{ secrets.RAILWAY_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require RAILWAY_TOKEN
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_TOKEN secret is not set. Add a Railway project token under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
