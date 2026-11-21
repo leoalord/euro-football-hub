@@ -35,7 +35,8 @@ function getZoneBadge(zone?: string) {
 // Form indicator dots: W=green, D=amber, L=red
 function FormIndicator({ form }: { form?: string }) {
   if (!form) return null;
-  const chars = form.slice(0, 5).split("");
+  // Form strings are newest-first; display oldest → newest so the latest result is on the right
+  const chars = form.slice(0, 5).split("").reverse();
   return (
     <div className="flex gap-0.5 items-center">
       {chars.map((c, i) => (

@@ -33,7 +33,8 @@ function getZoneBadgeLabel(zone?: string): string | null {
 // Form indicator dots
 function FormIndicator({ form, showLabel }: { form?: string; showLabel?: boolean }) {
   if (!form) return null;
-  const chars = form.slice(0, 5).split("");
+  // Form strings are newest-first; display oldest → newest so the latest result is on the right
+  const chars = form.slice(0, 5).split("").reverse();
 
   // Calculate form points
   const pts = chars.reduce((acc, c) => acc + (c === "W" ? 3 : c === "D" ? 1 : 0), 0);
@@ -54,7 +55,7 @@ function FormIndicator({ form, showLabel }: { form?: string; showLabel?: boolean
           />
         ))}
       </div>
-      {showLabel && <span className="text-[10px] text-muted-foreground">{form}</span>}
+      {showLabel && <span className="text-[10px] text-muted-foreground">{chars.join("")}</span>}
     </div>
   );
 }
